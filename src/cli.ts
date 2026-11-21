@@ -2,12 +2,15 @@
 import path from "node:path";
 import readline from "node:readline/promises";
 import { Command, Option } from "commander";
+import { render } from "ink";
+import { createElement } from "react";
 import { Agent, type AgentEvent } from "./agent/loop.js";
 import { buildSystemPrompt } from "./agent/systemPrompt.js";
 import { loadConfig } from "./config/index.js";
 import { PERMISSION_MODES, Permissions, type AskFn, type PermissionMode } from "./permissions/index.js";
 import { resolveModel } from "./providers/registry.js";
 import { defaultTools } from "./tools/registry.js";
+import { App, type AskBridge } from "./ui/App.js";
 
 interface Flags {
   print?: string;
@@ -36,15 +39,22 @@ const program = new Command()
     }
     const { provider, model } = resolveModel(config.model, { anthropic: { ...config.anthropic, effort: config.effort } });
 
-    const rl = process.stdin.isTTY ? readline.createInterface({ input: process.stdin, output: process.stderr }) : undefined;
-    const ask: AskFn | undefined = rl
-      ? async (req) => {
-          const a = (await rl.question(`\n\x1b[36m? Allow ${req.tool}: ${req.summary}\x1b[0m  [y]es / [a]lways / [n]o (reason): `)).trim();
-          if (/^a/i.test(a)) return { kind: "always" };
-          if (/^y/i.test(a) || a === "") return { kind: "yes" };
-          return { kind: "no", reason: a.replace(/^n(o)?\s*/i, "") || undefined };
-        }
-      : undefined;
+    const headless = flags.print !== undefined;
+    const tty = Boolean(process.stdin.isTTY);
+    // Headless: ask on stderr with readline. Interactive: the TUI's dialog.
+    const rl = headless && tty ? readline.createInterface({ input: process.stdin, output: process.stderr }) : undefined;
+    const bridge: AskBridge = {};
+    let ask: AskFn | undefined;
+    if (rl) {
+      ask = async (req) => {
+        const a = (await rl.question(`\n\x1b[36m? Allow ${req.tool}: ${req.summary}\x1b[0m  [y]es / [a]lways / [n]o (reason): `)).trim();
+        if (/^a/i.test(a)) return { kind: "always" };
+        if (/^y/i.test(a) || a === "") return { kind: "yes" };
+        return { kind: "no", reason: a.replace(/^n(o)?\s*/i, "") || undefined };
+      };
+    } else if (!headless) {
+      ask = (req) => (bridge.ask ? bridge.ask(req) : Promise.resolve({ kind: "no", reason: "UI not ready" }));
+    }
 
     const agent = new Agent({
       provider,
@@ -56,19 +66,28 @@ const program = new Command()
       maxTokens: config.maxTokens,
     });
 
-    const prompt = flags.print ?? (words.length ? words.join(" ") : undefined);
     if (flags.print !== undefined) {
       const ok = await runPrompt(agent, flags.print, flags.output);
       rl?.close();
       process.exitCode = ok ? 0 : 1;
       return;
     }
-    if (!rl) {
-      process.stderr.write("forge: stdin is not a terminal; use -p \"<prompt>\" for headless mode\n");
+    if (!tty) {
+      process.stderr.write('forge: stdin is not a terminal; use -p "<prompt>" for headless mode\n');
       process.exitCode = 2;
       return;
     }
-    await repl(agent, rl, prompt);
+    const app = render(
+      createElement(App, {
+        agent,
+        root,
+        bridge,
+        allowBypass: config.permissionMode === "bypass",
+        initialPrompt: words.length ? words.join(" ") : undefined,
+      }),
+      { exitOnCtrlC: false },
+    );
+    await app.waitUntilExit();
   });
 
 /** Run one prompt; Ctrl+C aborts the turn. Returns false on error/refusal. */
@@ -131,21 +150,6 @@ function renderText(ev: AgentEvent): void {
       if (ev.stop === "aborted") process.stderr.write("\x1b[33m[interrupted]\x1b[0m\n");
       break;
   }
-}
-
-/** Minimal line REPL; the Ink TUI replaces it in Milestone 2. */
-async function repl(agent: Agent, rl: readline.Interface, first?: string): Promise<void> {
-  process.stderr.write(`\x1b[1mforge\x1b[0m · ${agent.model} · type /exit to quit\n`);
-  let next = first;
-  while (true) {
-    const line = next ?? (await rl.question("\n\x1b[1m>\x1b[0m ").catch(() => "/exit"));
-    next = undefined;
-    const prompt = line.trim();
-    if (!prompt) continue;
-    if (prompt === "/exit" || prompt === "/quit") break;
-    await runPrompt(agent, prompt, "text");
-  }
-  rl.close();
 }
 
 program.parseAsync().catch((err: unknown) => {

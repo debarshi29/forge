@@ -53,6 +53,21 @@ export class Agent {
     return this.opts.model;
   }
 
+  get contextWindow(): number {
+    return this.opts.provider.capabilities(this.opts.model).contextWindow;
+  }
+
+  get permissions(): Permissions {
+    return this.opts.permissions;
+  }
+
+  /** Start a fresh conversation (/clear). */
+  reset(): void {
+    this.messages.length = 0;
+    this.toolCtx.fileState.clear();
+    this.lastInputTokens = 0;
+  }
+
   /** Run one user prompt to completion, yielding events for the UI. */
   async *send(prompt: string | Block[], signal: AbortSignal = new AbortController().signal): AsyncGenerator<AgentEvent> {
     this.pushUser(typeof prompt === "string" ? [{ type: "text", text: prompt }] : prompt);
