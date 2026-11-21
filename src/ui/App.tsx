@@ -132,6 +132,9 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     [agent],
   );
 
+  // Modes also change from inside a turn (an approved plan), so follow the source of truth.
+  useEffect(() => agent.permissions.onModeChange(setModeState), [agent]);
+
   useEffect(() => {
     bridge.ask = (req) => new Promise<AskAnswer>((resolve) => setPending({ req, resolve }));
     return () => {
@@ -184,12 +187,17 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
               push({ kind: "tool", name: ev.name, summary: summaries.current.get(ev.id) ?? "", result: ev.result });
               summaries.current.delete(ev.id);
               break;
+            case "hook":
+              flush();
+              push({ kind: "info", text: `⚓ ${ev.text}`, tone: ev.tone === "info" ? "info" : ev.tone });
+              break;
             case "retry":
               push({ kind: "info", text: `Stream interrupted (${ev.reason}); retrying…`, tone: "warn" });
               break;
             case "done":
               flush();
               flashPet(ev.stop === "end_turn" ? "done" : ev.stop === "aborted" ? "idle" : "error");
+              if (ev.stop === "blocked") break;
               if (ev.stop === "aborted") push({ kind: "info", text: "Interrupted.", tone: "warn" });
               else if (ev.stop === "refusal") push({ kind: "info", text: `The model declined to continue${ev.detail ? `: ${ev.detail}` : "."}`, tone: "warn" });
               else if (ev.stop === "max_tokens") push({ kind: "info", text: "Response cut off at max_tokens.", tone: "warn" });

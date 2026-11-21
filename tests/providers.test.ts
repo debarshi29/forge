@@ -121,6 +121,12 @@ describe("OpenAI adapter", () => {
       calls: [{ name: "read", args: {} }],
       rest: "Reading:",
     });
+    // Several pretty-printed calls back to back in one fence (seen from qwen2.5-coder:3b).
+    const two = '```json\n{\n  "name": "write",\n  "arguments": { "path": "s.txt", "content": "a {b} \\"c\\"" }\n}\n\n{\n  "name": "read",\n  "arguments": { "path": "s.txt" }\n}\n```';
+    expect(extractToolCalls(two, names).calls).toEqual([
+      { name: "write", args: { path: "s.txt", content: 'a {b} "c"' } },
+      { name: "read", args: { path: "s.txt" } },
+    ]);
     // Example code that isn't a call for a known tool stays as text.
     const prose = 'Config looks like:\n```json\n{"name": "my-app", "version": 1}\n```';
     expect(extractToolCalls(prose, names)).toEqual({ calls: [], rest: prose.trim() });

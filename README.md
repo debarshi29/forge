@@ -77,6 +77,67 @@ forge --no-session        # don't save this one
 Standing instructions are read from `AGENTS.md` and `FORGE.md`: first `~/.forge/`, then every directory from the repo root
 down to the working directory (more specific files come later and win). `/memory` lists what is loaded.
 
+### Permissions
+
+Read-only tools run freely; edits and commands ask first. Shift+Tab cycles the mode:
+
+| Mode | What runs without asking |
+|---|---|
+| `default` | read-only tools |
+| `acceptEdits` | read-only tools, plus `write` and `edit` |
+| `plan` | read-only tools only; Forge investigates, then shows you a plan to approve (approving switches to `default` or `acceptEdits`) |
+| `bypass` | everything (start-up flag only: `--permission-mode bypass`) |
+
+Rules in `~/.forge/settings.json` or `<project>/.forge/settings.json` (both files' rules apply) fine-tune that:
+
+```json
+{
+  "permissions": {
+    "allow": ["bash(npm test:*)", "bash(git status)", "edit(src/**)"],
+    "ask": ["edit(package.json)"],
+    "deny": ["read(.env)", "bash(git push:*)", "write(.git/**)"]
+  }
+}
+```
+
+- `bash(cmd)` is an exact command, `bash(cmd:*)` that command with any arguments, and `*` a wildcard. For
+  compound commands (`a && b | c`), deny matches if any part does, and allow only if every part does and there
+  is no `$(…)` or `>` redirection.
+- File tools take a glob relative to the project root; a pattern without `/` matches the file name anywhere.
+- Deny beats ask, and ask beats allow. Deny rules apply in every mode, including bypass.
+- Destructive commands (`rm -rf /`, `git push --force`, `git reset --hard`, `curl … | sh`, `sudo`, …) always ask
+  with a warning, whatever the rules or mode, and can't be "always allowed". Non-interactive runs refuse them.
+
+`/permissions` shows what is in effect.
+
+### Hooks
+
+Hooks are shell commands Forge runs at points in the loop. Each gets the event as JSON on stdin:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{ "matcher": "bash", "command": "node .forge/guard.mjs" }],
+    "PostToolUse": [{ "matcher": "write|edit", "command": "npx prettier --write \"$(node -p 'JSON.parse(require(\"fs\").readFileSync(0)).tool_input.path')\"" }],
+    "UserPromptSubmit": [{ "command": "git branch --show-current" }],
+    "Stop": [{ "command": "npm test --silent >/dev/null 2>&1 || { echo 'tests fail' >&2; exit 2; }" }]
+  }
+}
+```
+
+| Event | Fields | Exit code 2 (stderr is the message) |
+|---|---|---|
+| `PreToolUse` | `tool_name`, `tool_input` | blocks the call; the model sees why |
+| `PostToolUse` | `tool_name`, `tool_input`, `tool_response` | feedback is appended to the tool result |
+| `UserPromptSubmit` | `prompt` | the prompt is not sent; stdout (on exit 0) is added as context |
+| `Stop` | `stop_hook_active` | the model keeps working (up to 3 times per prompt) |
+
+Every event also has `hook_event_name`, `cwd` and `permission_mode`. `matcher` is a regex on the tool name. Other
+non-zero exits are reported but don't block. On exit 0, stdout may be JSON: `{"decision": "block", "reason": "…"}`,
+`{"updatedInput": {…}}` (PreToolUse: replaces the tool input, which is then validated and permission-checked), or
+`{"additionalContext": "…"}`. Hooks run in the project directory with `FORGE_PROJECT_DIR` set, and time out after
+`timeout` seconds (default 60).
+
 ## Development
 
 ```sh

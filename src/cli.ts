@@ -14,6 +14,7 @@ import { messagesToItems } from "./ui/history.js";
 import { loadConfig, saveUserSettings } from "./config/index.js";
 import { DEFAULT_THEME, findTheme } from "./ui/theme.js";
 import { PERMISSION_MODES, Permissions, type AskFn, type PermissionMode } from "./permissions/index.js";
+import { Hooks } from "./hooks/index.js";
 import { listModelOptions, resolveModelForUse } from "./providers/catalog.js";
 import type { ProviderSettings } from "./providers/registry.js";
 import { defaultTools } from "./tools/registry.js";
@@ -71,8 +72,17 @@ const program = new Command()
     let ask: AskFn | undefined;
     if (rl) {
       ask = async (req) => {
-        const a = (await rl.question(`\n\x1b[36m? Allow ${req.tool}: ${req.summary}\x1b[0m  [y]es / [a]lways / [n]o (reason): `)).trim();
-        if (/^a/i.test(a)) return { kind: "always" };
+        if (req.kind === "plan") {
+          process.stderr.write(`\n\x1b[36m── Forge's plan ──\x1b[0m\n${req.summary}\n`);
+          const a = (await rl.question("\x1b[36m? Approve? [y]es / [a]uto-accept edits / [n]o (what to change): \x1b[0m")).trim();
+          if (/^a/i.test(a)) return { kind: "always" };
+          if (/^y/i.test(a) || a === "") return { kind: "yes" };
+          return { kind: "no", reason: a.replace(/^n(o)?\s*/i, "") || undefined };
+        }
+        if (req.warning) process.stderr.write(`\n\x1b[31m⚠ ${req.warning}\x1b[0m`);
+        const always = req.allowAlways === false ? "" : " / [a]lways";
+        const a = (await rl.question(`\n\x1b[36m? Allow ${req.tool}: ${req.summary}\x1b[0m  [y]es${always} / [n]o (reason): `)).trim();
+        if (/^a/i.test(a) && req.allowAlways !== false) return { kind: "always" };
         if (/^y/i.test(a) || a === "") return { kind: "yes" };
         return { kind: "no", reason: a.replace(/^n(o)?\s*/i, "") || undefined };
       };
@@ -87,9 +97,10 @@ const program = new Command()
       model,
       system: buildSystemPrompt({ root, cwd: root, model: resolved.spec, memory }),
       tools,
-      permissions: new Permissions(config.permissionMode, ask),
+      permissions: new Permissions(config.permissionMode, ask, { rules: config.permissions, root }),
       root,
       maxTokens: config.maxTokens,
+      hooks: new Hooks(config.hooks, root),
     });
 
     // Sessions: --continue (latest), --resume <id>, or --resume alone (picker).
@@ -223,6 +234,9 @@ function renderText(ev: AgentEvent): void {
       process.stderr.write(`  ${ev.result.isError ? "\x1b[31m" : "\x1b[2m"}${preview}${text.split("\n").length > 4 ? " …" : ""}\x1b[0m\n`);
       break;
     }
+    case "hook":
+      process.stderr.write(`\n${ev.tone === "error" ? "\x1b[31m" : ev.tone === "warn" ? "\x1b[33m" : "\x1b[2m"}[hook] ${ev.text}\x1b[0m\n`);
+      break;
     case "retry":
       process.stderr.write(dim(`\n[stream failed (${ev.reason}); retrying ${ev.attempt}]\n`));
       break;

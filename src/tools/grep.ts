@@ -2,7 +2,7 @@ import path from "node:path";
 import { rgPath } from "@vscode/ripgrep";
 import { execa } from "execa";
 import { z } from "zod";
-import { resolvePath } from "./paths.js";
+import { isInside, resolvePath } from "./paths.js";
 import { defineTool, ToolError } from "./types.js";
 
 const DEFAULT_HEAD = 250;
@@ -27,7 +27,7 @@ export const grepTool = defineTool({
   readOnly: true,
   summarize: (i) => (i.path ? `"${i.pattern}" in ${i.path}` : `"${i.pattern}"`),
   async run(input, ctx) {
-    const target = resolvePath(ctx, input.path ?? ".");
+    const target = resolvePath(ctx, input.path ?? ".", { allowOutside: true });
     const mode = input.output_mode ?? "files_with_matches";
     const args = ["--color=never", "--no-messages", "--hidden", "--glob=!.git"];
     if (mode === "files_with_matches") args.push("--files-with-matches");
@@ -39,7 +39,7 @@ export const grepTool = defineTool({
     if (input.glob) args.push(`--glob=${input.glob}`);
     if (input.type) args.push(`--type=${input.type}`);
     // Search a root-relative path so output paths come back relative.
-    args.push("--regexp", input.pattern, path.relative(ctx.root, target) || ".");
+    args.push("--regexp", input.pattern, isInside(ctx.root, target) ? path.relative(ctx.root, target) || "." : target);
 
     const r = await execa(rgPath, args, { cwd: ctx.root, reject: false, cancelSignal: ctx.signal, maxBuffer: 50_000_000 });
     if (r.exitCode === 1) return { content: "No matches found" };

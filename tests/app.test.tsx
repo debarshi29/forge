@@ -277,6 +277,41 @@ describe("TUI", () => {
     ]);
   });
 
+  it("shows a plan for approval and leaves plan mode when it is accepted", async () => {
+    const { agent, stdout, type } = await mount(
+      [{ toolCalls: [{ name: "exit_plan_mode", input: { plan: "## Plan\n1. Add **a.txt**" } }] }, { text: "Implementing now." }],
+      "plan",
+    );
+    await until(() => stdout.text().includes("plan mode (read-only)"));
+    await type("add a file\r");
+    await until(() => stdout.text().includes("Here is Forge's plan") && stdout.text().includes("Yes, and auto-accept edits"));
+    expect(stdout.text()).toContain("1. Add a.txt");
+    await sleep(100);
+    await type("1");
+    await until(() => stdout.text().includes("Implementing now."));
+    expect(agent.permissions.mode).toBe("acceptEdits");
+    await until(() => stdout.text().includes("auto-accept"));
+  });
+
+  it("warns about dangerous commands and offers no 'don't ask again'", async () => {
+    const { stdout, type } = await mount([{ toolCalls: [{ name: "bash", input: { command: "git push --force" } }] }, { text: "ok" }]);
+    await type("push it\r");
+    await until(() => stdout.text().includes("Allow bash?"));
+    expect(stdout.text()).toContain("⚠ This command force-pushes");
+    expect(stdout.text()).not.toContain("don't ask again");
+    await sleep(100);
+    await type("2"); // "No" is option 2 here
+    await until(() => stdout.text().includes("Reason"));
+    await type("\r");
+    await until(() => stdout.text().includes("denied"));
+  });
+
+  it("lists rules with /permissions", async () => {
+    const { stdout, type } = await mount([]);
+    await type("/permissions\r");
+    await until(() => stdout.text().includes("Permission mode: default") && stdout.text().includes("always ask"));
+  });
+
   it("runs slash commands", async () => {
     const { stdout, type } = await mount([]);
     await type("/help\r");

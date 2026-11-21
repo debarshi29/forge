@@ -1,4 +1,5 @@
-import type { Permissions } from "../permissions/index.js";
+import type { HookEvent, Hooks } from "../hooks/index.js";
+import type { PermissionMode, Permissions } from "../permissions/index.js";
 import { ProviderStreamError } from "../providers/errors.js";
 import type {
   Block,
@@ -17,6 +18,21 @@ import { ToolError, type Tool, type ToolContext, type ToolResult } from "../tool
 
 export const MAX_TOOL_OUTPUT = 30_000;
 const MAX_STREAM_RETRIES = 2;
+/** How many times a Stop hook may send the model back to work in one prompt. */
+const MAX_STOP_HOOK_CONTINUES = 3;
+
+const PLAN_REMINDER =
+  "Plan mode is on. Investigate with read-only tools only: don't edit files or run commands that change anything. When you know what to do, call exit_plan_mode with a concrete plan for the user to approve. If the request is just a question, answer it directly.";
+const PLAN_ENDED = "Plan mode is off now. You may edit files and run commands (they may still ask the user for permission).";
+
+/** Wraps text the harness adds to a user turn; the UI hides it. */
+export function reminder(text: string): Block {
+  return { type: "text", text: `<system-reminder>\n${text}\n</system-reminder>` };
+}
+
+export function isReminder(text: string): boolean {
+  return text.trimStart().startsWith("<system-reminder>");
+}
 
 export type AgentEvent =
   | Exclude<StreamEvent, { type: "message_end" }>
@@ -24,7 +40,8 @@ export type AgentEvent =
   | { type: "tool_start"; id: string; name: string; input: unknown; summary: string }
   | { type: "tool_end"; id: string; name: string; result: ToolResult }
   | { type: "retry"; attempt: number; reason: string }
-  | { type: "done"; stop: StopReason | "aborted"; text: string; detail?: string };
+  | { type: "hook"; event: HookEvent; text: string; tone: "info" | "warn" | "error" }
+  | { type: "done"; stop: StopReason | "aborted" | "blocked"; text: string; detail?: string };
 
 export interface AgentOptions {
   provider: Provider;
@@ -38,6 +55,8 @@ export interface AgentOptions {
   messages?: Message[];
   /** Persistence hook (sessions): sees every appended message and usage. */
   recorder?: Recorder;
+  /** User-configured shell hooks (settings "hooks"). */
+  hooks?: Hooks;
 }
 
 export interface Recorder {
@@ -54,11 +73,19 @@ export class Agent {
   /** Session cost in USD for models with known prices. */
   costUSD = 0;
   private readonly toolCtx: Omit<ToolContext, "signal">;
+  /** Mode when the last prompt was sent, to tell the model when plan mode ends. */
+  private lastPromptMode: PermissionMode | undefined;
 
   constructor(private opts: AgentOptions) {
     this.messages = opts.messages ?? [];
     const cwd = opts.cwd ?? opts.root;
-    this.toolCtx = { root: opts.root, cwd, fileState: new Map(), shell: { cwd } };
+    this.toolCtx = {
+      root: opts.root,
+      cwd,
+      fileState: new Map(),
+      shell: { cwd },
+      approvePlan: (plan) => this.opts.permissions.approvePlan(plan),
+    };
   }
 
   /** Model id as the provider knows it. */
@@ -93,6 +120,10 @@ export class Agent {
     return this.opts.tools;
   }
 
+  get hooks(): Hooks | undefined {
+    return this.opts.hooks;
+  }
+
   get recorder(): Recorder | undefined {
     return this.opts.recorder;
   }
@@ -102,6 +133,7 @@ export class Agent {
     this.messages.length = 0;
     this.toolCtx.fileState.clear();
     this.lastInputTokens = 0;
+    this.lastPromptMode = undefined;
   }
 
   /** Replace the conversation with a saved one (/resume). */
@@ -121,8 +153,26 @@ export class Agent {
 
   /** Run one user prompt to completion, yielding events for the UI. */
   async *send(prompt: string | Block[], signal: AbortSignal = new AbortController().signal): AsyncGenerator<AgentEvent> {
-    this.pushUser(typeof prompt === "string" ? [{ type: "text", text: prompt }] : prompt);
+    const blocks: Block[] = typeof prompt === "string" ? [{ type: "text", text: prompt }] : prompt;
+    const extra: Block[] = [];
+    if (this.opts.hooks?.has("UserPromptSubmit")) {
+      const promptText = blocks.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n");
+      const o = await this.opts.hooks.run({ ...this.hookBase("UserPromptSubmit"), prompt: promptText }, signal);
+      yield* hookWarnings("UserPromptSubmit", o.warnings);
+      if (o.block !== undefined) {
+        yield { type: "hook", event: "UserPromptSubmit", text: `Prompt blocked by a hook: ${o.block}`, tone: "error" };
+        yield { type: "done", stop: "blocked", text: "" };
+        return;
+      }
+      for (const c of o.context) extra.push(reminder(`A UserPromptSubmit hook added this context:\n${c}`));
+    }
+    const mode = this.opts.permissions.mode;
+    if (mode === "plan") extra.push(reminder(PLAN_REMINDER));
+    else if (this.lastPromptMode === "plan") extra.push(reminder(PLAN_ENDED));
+    this.lastPromptMode = mode;
+    this.pushUser([...blocks, ...extra]);
     const toolSpecs = this.opts.tools.map(toToolSpec);
+    let stopHookRuns = 0;
 
     while (true) {
       // --- stream one assistant turn (re-issued on retryable stream errors) ---
@@ -167,6 +217,16 @@ export class Agent {
 
       if (end.stop === "pause" && toolUses.length === 0) continue; // server asked us to resume
       if (end.stop === "refusal" || toolUses.length === 0) {
+        if (end.stop !== "refusal" && this.opts.hooks?.has("Stop") && !signal.aborted) {
+          const o = await this.opts.hooks.run({ ...this.hookBase("Stop"), stop_hook_active: stopHookRuns > 0 }, signal);
+          yield* hookWarnings("Stop", o.warnings);
+          if (o.block !== undefined && stopHookRuns < MAX_STOP_HOOK_CONTINUES && !signal.aborted) {
+            stopHookRuns++;
+            yield { type: "hook", event: "Stop", text: `A Stop hook sent Forge back to work: ${oneLine(o.block)}`, tone: "warn" };
+            this.pushUser([reminder(`A Stop hook blocked you from finishing:\n${o.block}\nAddress this, then finish.`)]);
+            continue;
+          }
+        }
         yield { type: "done", stop: end.stop, text, ...(end.detail ? { detail: end.detail } : {}) };
         return;
       }
@@ -213,7 +273,9 @@ export class Agent {
         });
       }
       yield* events;
-      const done = await Promise.all(batch.map((call) => this.runOne(call, signal)));
+      const notices: AgentEvent[] = [];
+      const done = await Promise.all(batch.map((call) => this.runOne(call, signal, notices)));
+      yield* notices;
       for (const [i, result] of done.entries()) {
         const call = batch[i]!;
         results.set(call.id, toResultBlock(call.id, result));
@@ -225,7 +287,7 @@ export class Agent {
     return calls.map((c) => results.get(c.id) ?? errorResult(c.id, "Interrupted by the user before this tool ran."));
   }
 
-  private async runOne(call: ToolUseBlock, signal: AbortSignal): Promise<ToolResult> {
+  private async runOne(call: ToolUseBlock, signal: AbortSignal, notices: AgentEvent[]): Promise<ToolResult> {
     const tool = this.findTool(call.name);
     if (!tool) return { content: `Unknown tool "${call.name}"`, isError: true };
 
@@ -239,18 +301,67 @@ export class Agent {
       };
     }
 
-    const decision = await this.opts.permissions.check(tool, parsed.data);
+    let input: unknown = parsed.data;
+    const hooks = this.opts.hooks;
+    if (hooks?.has("PreToolUse", tool.name)) {
+      const o = await hooks.run({ ...this.hookBase("PreToolUse"), tool_name: tool.name, tool_input: input }, signal);
+      notices.push(...hookWarnings("PreToolUse", o.warnings));
+      if (o.block !== undefined) {
+        notices.push({ type: "hook", event: "PreToolUse", text: `A hook blocked ${tool.name}: ${oneLine(o.block)}`, tone: "warn" });
+        return { content: `Blocked by a PreToolUse hook: ${o.block}`, isError: true };
+      }
+      if (o.updatedInput !== undefined) {
+        const re = tool.schema.safeParse(o.updatedInput);
+        if (!re.success) return { content: `A PreToolUse hook returned invalid input for ${tool.name}, so it was not run.`, isError: true };
+        input = re.data;
+        notices.push({ type: "hook", event: "PreToolUse", text: `A hook changed the input of ${tool.name}.`, tone: "info" });
+      }
+    }
+
+    const decision = await this.opts.permissions.check(tool, input);
     if (!decision.allow) return { content: decision.reason, isError: true };
     if (signal.aborted) return { content: "Interrupted by the user.", isError: true };
 
+    let result: ToolResult;
     try {
-      const result = await tool.run(parsed.data, { ...this.toolCtx, signal });
-      return typeof result.content === "string" ? { ...result, content: truncate(result.content, MAX_TOOL_OUTPUT) } : result;
+      result = await tool.run(input, { ...this.toolCtx, signal });
+      if (typeof result.content === "string") result = { ...result, content: truncate(result.content, MAX_TOOL_OUTPUT) };
     } catch (err) {
       if (signal.aborted) return { content: "Interrupted by the user.", isError: true };
       const msg = err instanceof ToolError ? err.message : `${call.name} failed: ${err instanceof Error ? err.message : String(err)}`;
-      return { content: msg, isError: true };
+      result = { content: msg, isError: true };
     }
+
+    if (hooks?.has("PostToolUse", tool.name) && !signal.aborted) {
+      const text =
+        typeof result.content === "string" ? result.content : result.content.map((b) => (b.type === "text" ? b.text : "[image]")).join("\n");
+      const o = await hooks.run(
+        {
+          ...this.hookBase("PostToolUse"),
+          tool_name: tool.name,
+          tool_input: input,
+          tool_response: { content: text, is_error: Boolean(result.isError) },
+        },
+        signal,
+      );
+      notices.push(...hookWarnings("PostToolUse", o.warnings));
+      const feedback = [...(o.block !== undefined ? [`PostToolUse hook feedback:\n${o.block}`] : []), ...o.context];
+      if (o.block !== undefined) {
+        notices.push({ type: "hook", event: "PostToolUse", text: `Hook feedback on ${tool.name}: ${oneLine(o.block)}`, tone: "warn" });
+      }
+      if (feedback.length) {
+        const note = `<system-reminder>\n${feedback.join("\n\n")}\n</system-reminder>`;
+        result =
+          typeof result.content === "string"
+            ? { ...result, content: `${result.content}\n\n${note}` }
+            : { ...result, content: [...result.content, { type: "text", text: note }] };
+      }
+    }
+    return result;
+  }
+
+  private hookBase(event: HookEvent) {
+    return { hook_event_name: event, cwd: this.toolCtx.shell.cwd, permission_mode: this.opts.permissions.mode };
   }
 
   private findTool(name: string): Tool | undefined {
@@ -275,6 +386,15 @@ export class Agent {
     this.usage.cacheWriteTokens = (this.usage.cacheWriteTokens ?? 0) + (u.cacheWriteTokens ?? 0);
     this.lastInputTokens = u.inputTokens;
   }
+}
+
+function hookWarnings(event: HookEvent, warnings: string[]): AgentEvent[] {
+  return warnings.map((text): AgentEvent => ({ type: "hook", event, text, tone: "error" }));
+}
+
+function oneLine(s: string): string {
+  const l = s.replace(/\s+/g, " ").trim();
+  return l.length > 200 ? `${l.slice(0, 199)}…` : l;
 }
 
 function toResultBlock(id: string, r: ToolResult): ToolResultBlock {

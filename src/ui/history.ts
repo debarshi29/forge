@@ -1,3 +1,4 @@
+import { isReminder } from "../agent/loop.js";
 import type { Message, ToolResultBlock } from "../providers/types.js";
 import type { Tool } from "../tools/types.js";
 import type { Item } from "./Transcript.js";
@@ -12,7 +13,7 @@ export function messagesToItems(messages: Message[], tools: Tool[]): ItemInput[]
   const items: ItemInput[] = [];
   for (const m of messages) {
     for (const b of m.content) {
-      if (b.type === "text" && b.text.trim()) {
+      if (b.type === "text" && b.text.trim() && !isReminder(b.text)) {
         items.push(m.role === "user" ? { kind: "user", text: b.text } : { kind: "assistant", text: b.text });
       } else if (b.type === "tool_use") {
         const tool = tools.find((t) => t.name === b.name);
