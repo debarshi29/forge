@@ -8,9 +8,20 @@ A from-scratch terminal coding agent in the spirit of Claude Code and Codex CLI:
 
 > Status: early development. See [PLAN.md](PLAN.md) for the architecture and milestones.
 
+## Install
+
+```sh
+pnpm install
+pnpm build
+npm link        # puts `forge` on your PATH (npm's global bin), pointing at this checkout
+forge --version
+```
+
+After pulling changes, run `pnpm build` again; the link always uses the latest `dist/`. Remove it with `npm unlink -g forge`.
+
 ## Usage
 
-Needs Node 22+ and Anthropic credentials (`ANTHROPIC_API_KEY`, or `ant auth login`).
+Needs Node 22+ and credentials for your provider (for Claude: `ANTHROPIC_API_KEY`, or `ant auth login`).
 
 ```sh
 pnpm install
