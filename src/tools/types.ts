@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { PlanDecision } from "../permissions/index.js";
 import type { ImageBlock, TextBlock } from "../providers/types.js";
 
 export interface ToolResult {
@@ -19,6 +20,8 @@ export interface ToolContext {
   fileState: Map<string, number>;
   /** Persistent shell state for the bash tool. */
   shell: { cwd: string };
+  /** Show a plan to the user and leave plan mode if they approve (exit_plan_mode). */
+  approvePlan?(plan: string): Promise<PlanDecision>;
 }
 
 export interface Tool<S extends z.ZodType = z.ZodType> {

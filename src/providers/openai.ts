@@ -174,9 +174,13 @@ export function extractTextToolCalls(text: string, toolNames: Set<string>): Arra
     const whole: unknown = JSON.parse(body);
     candidates.push(...(Array.isArray(whole) ? whole : [whole]));
   } catch {
-    for (const line of body.split(/\r?\n/).filter((l) => l.trim())) {
+    // Several values in a row: one per line, or pretty-printed back to back.
+    const values = splitJsonValues(body);
+    if (!values) return [];
+    for (const v of values) {
       try {
-        candidates.push(JSON.parse(line));
+        const parsed: unknown = JSON.parse(v);
+        candidates.push(...(Array.isArray(parsed) ? parsed : [parsed]));
       } catch {
         return [];
       }
@@ -192,6 +196,36 @@ export function extractTextToolCalls(text: string, toolNames: Set<string>): Arra
     calls.push({ name: o.name, args });
   }
   return calls;
+}
+
+/** Split concatenated top-level JSON objects/arrays; undefined if anything else sits between them. */
+function splitJsonValues(text: string): string[] | undefined {
+  const out: string[] = [];
+  let depth = 0;
+  let start = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (inString) {
+      if (c === "\\") i++;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      if (depth === 0) return undefined;
+      inString = true;
+    } else if (c === "{" || c === "[") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === "}" || c === "]") {
+      depth--;
+      if (depth < 0) return undefined;
+      if (depth === 0) out.push(text.slice(start, i + 1));
+    } else if (depth === 0 && !/[\s,]/.test(c)) {
+      return undefined;
+    }
+  }
+  return depth === 0 && out.length ? out : undefined;
 }
 
 /**

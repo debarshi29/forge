@@ -4,6 +4,29 @@ import path from "node:path";
 import { z } from "zod";
 import { PERMISSION_MODES, type PermissionMode } from "../permissions/index.js";
 import { DEFAULT_MODEL } from "../providers/registry.js";
+import { HOOK_EVENTS, type HooksConfig } from "../hooks/index.js";
+import { parseRule } from "../permissions/rules.js";
+
+const RuleList = z.array(
+  z.string().superRefine((r, ctx) => {
+    try {
+      parseRule(r);
+    } catch (err) {
+      ctx.addIssue({ code: "custom", message: (err as Error).message });
+    }
+  }),
+);
+
+const HookSpecSchema = z.object({
+  matcher: z.string().optional(),
+  command: z.string().min(1),
+  timeout: z.number().positive().optional(),
+});
+
+const HooksSchema = z.object(Object.fromEntries(HOOK_EVENTS.map((e) => [e, z.array(HookSpecSchema)])) as Record<
+  (typeof HOOK_EVENTS)[number],
+  z.ZodArray<typeof HookSpecSchema>
+>).partial();
 
 const SettingsSchema = z
   .object({
@@ -21,6 +44,10 @@ const SettingsSchema = z
     gemini: z.object({ vertexai: z.boolean(), project: z.string(), location: z.string() }).partial(),
     ollama: z.object({ baseURL: z.string(), contextWindow: z.number().int().positive() }).partial(),
     lmstudio: z.object({ baseURL: z.string(), contextWindow: z.number().int().positive() }).partial(),
+    /** Permission rules like "bash(git status:*)" or "edit(src/**)". */
+    permissions: z.object({ allow: RuleList, deny: RuleList, ask: RuleList }).partial(),
+    /** Shell commands run around tool calls, prompts and stops. */
+    hooks: HooksSchema,
   })
   .partial();
 
@@ -42,6 +69,10 @@ export interface Config {
   gemini: NonNullable<Settings["gemini"]>;
   ollama: NonNullable<Settings["ollama"]>;
   lmstudio: NonNullable<Settings["lmstudio"]>;
+  /** Rules from every settings file, concatenated. */
+  permissions: { allow: string[]; deny: string[]; ask: string[] };
+  /** Hooks from every settings file, concatenated per event. */
+  hooks: HooksConfig;
   /** Files that were loaded, lowest precedence first. */
   sources: string[];
 }
@@ -85,6 +116,18 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
       const next: Settings = { ...merged, ...s };
       // Provider sections merge key by key rather than replacing each other.
       for (const k of PROVIDER_KEYS) next[k] = { ...merged[k], ...s[k] } as never;
+      // Rules and hooks add up: a project can't silently drop the user's deny rules.
+      next.permissions = {
+        allow: [...(merged.permissions?.allow ?? []), ...(s.permissions?.allow ?? [])],
+        deny: [...(merged.permissions?.deny ?? []), ...(s.permissions?.deny ?? [])],
+        ask: [...(merged.permissions?.ask ?? []), ...(s.permissions?.ask ?? [])],
+      };
+      const hooks: HooksConfig = {};
+      for (const e of HOOK_EVENTS) {
+        const list = [...(merged.hooks?.[e] ?? []), ...(s.hooks?.[e] ?? [])];
+        if (list.length) hooks[e] = list;
+      }
+      next.hooks = hooks;
       merged = next;
     }
   }
@@ -105,6 +148,12 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
     gemini: merged.gemini ?? {},
     ollama: merged.ollama ?? {},
     lmstudio: merged.lmstudio ?? {},
+    permissions: {
+      allow: merged.permissions?.allow ?? [],
+      deny: merged.permissions?.deny ?? [],
+      ask: merged.permissions?.ask ?? [],
+    },
+    hooks: merged.hooks ?? {},
     sources,
   };
 }

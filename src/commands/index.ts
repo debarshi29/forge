@@ -47,7 +47,7 @@ export const COMMANDS: SlashCommand[] = [
     run(_a, ctx) {
       const cmds = COMMANDS.map((c) => `  /${c.name}${c.args ? ` ${c.args}` : ""}`.padEnd(24) + c.description).join("\n");
       ctx.print(
-        `Commands:\n${cmds}\n\nKeys:\n  Enter submit · \\ then Enter for a new line · ↑/↓ history\n  Esc or Ctrl+C interrupt · Shift+Tab cycle permission mode · Ctrl+C twice (idle) exit`,
+        `Commands:\n${cmds}\n\nKeys:\n  Enter submit · \\ then Enter for a new line · ↑/↓ history\n  Esc or Ctrl+C interrupt · Shift+Tab cycle permission mode (plan mode: read-only, then approve a plan) · Ctrl+C twice (idle) exit`,
       );
     },
   },
@@ -176,6 +176,26 @@ export const COMMANDS: SlashCommand[] = [
         default:
           return ctx.print("Usage: /pet [name <name> | clicks on|off | hide]", "error");
       }
+    },
+  },
+  {
+    name: "permissions",
+    description: "Show the permission mode, rules and hooks in effect",
+    run(_a, ctx) {
+      const d = ctx.agent.permissions.describe();
+      const list = (label: string, rules: string[]) => (rules.length ? `\n${label}:\n${rules.map((r) => `  ${r}`).join("\n")}` : "");
+      const hooks = ctx.agent.hooks?.list() ?? [];
+      const hookText = hooks.length
+        ? `\nHooks:\n${hooks.map((h) => `  ${h.event}${h.matcher ? `(${h.matcher})` : ""}: ${h.command}`).join("\n")}`
+        : "";
+      const none = !d.allow.length && !d.deny.length && !d.ask.length && !d.session.length && !hooks.length;
+      ctx.print(
+        `Permission mode: ${d.mode}${list("Deny", d.deny)}${list("Ask", d.ask)}${list("Allow", d.allow)}${list("Allowed this session", d.session)}${hookText}${
+          none
+            ? '\n\nNo rules or hooks yet. Add them to .forge/settings.json (project) or ~/.forge/settings.json, e.g.\n  { "permissions": { "allow": ["bash(npm test:*)"], "deny": ["read(.env)"] } }'
+            : ""
+        }\n\nDangerous commands (rm -rf /, git push --force, curl | sh…) always ask, whatever the rules or mode.`,
+      );
     },
   },
   {
