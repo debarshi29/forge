@@ -1,6 +1,13 @@
 import { Box, Text, useInput } from "ink";
 import { useRef, useState } from "react";
 
+/** An entry in the completion menu (slash commands). */
+export interface Suggestion {
+  name: string;
+  args?: string;
+  description: string;
+}
+
 interface Props {
   active: boolean;
   placeholder?: string;
@@ -8,23 +15,47 @@ interface Props {
   onChange?(value: string): void;
   /** Called on Ctrl+C with the current value (the app decides: clear or exit). */
   onCtrlC?(value: string): void;
+  /** Menu entries for the current value; shown below the box when non-empty. */
+  suggest?(value: string): Suggestion[];
 }
+
+/** Menu rows shown at once; the list scrolls to keep the selection visible. */
+export const MENU_ROWS = 6;
 
 /**
  * Line editor: Enter submits, a trailing "\" + Enter inserts a newline,
  * ↑/↓ walk history, ←/→ move, Ctrl+A/E home/end, Ctrl+U clears.
+ * While the suggestion menu is open, ↑/↓ move through it, Enter runs the
+ * highlighted entry, Tab completes it, and Esc closes the menu.
  */
-export function Input({ active, placeholder, onSubmit, onChange, onCtrlC }: Props) {
+export function Input({ active, placeholder, onSubmit, onChange, onCtrlC, suggest }: Props) {
   const [value, setValueState] = useState("");
   const [cursor, setCursor] = useState(0);
+  const [selected, setSelected] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
   const history = useRef<string[]>([]);
   const histIdx = useRef<number>(-1);
   const draft = useRef("");
 
+  const menu = !dismissed && suggest ? suggest(value) : [];
+  const sel = Math.min(selected, Math.max(0, menu.length - 1));
+
   const setValue = (v: string, c = v.length) => {
+    if (v !== value) {
+      setSelected(0);
+      setDismissed(false);
+    }
     setValueState(v);
     setCursor(Math.max(0, Math.min(c, v.length)));
     onChange?.(v);
+  };
+
+  const submit = (v: string) => {
+    if (!v.trim()) return;
+    if (history.current.at(-1) !== v) history.current.push(v);
+    histIdx.current = -1;
+    setValue("");
+    onSubmit(v);
   };
 
   useInput(
@@ -37,17 +68,23 @@ export function Input({ active, placeholder, onSubmit, onChange, onCtrlC }: Prop
         if (value) setValue("");
         return;
       }
+      if (menu.length) {
+        if (key.upArrow) return setSelected((sel + menu.length - 1) % menu.length);
+        if (key.downArrow) return setSelected((sel + 1) % menu.length);
+        if (key.escape) return setDismissed(true);
+        if (key.tab) {
+          const s = menu[sel]!;
+          const done = `/${s.name}${s.args ? " " : ""}`;
+          return setValue(done);
+        }
+        if (key.return) return submit(`/${menu[sel]!.name}`);
+      }
       if (key.return) {
         if (value.slice(0, cursor).endsWith("\\")) {
           setValue(value.slice(0, cursor - 1) + "\n" + value.slice(cursor), cursor);
           return;
         }
-        const v = value;
-        if (!v.trim()) return;
-        if (history.current.at(-1) !== v) history.current.push(v);
-        histIdx.current = -1;
-        setValue("");
-        onSubmit(v);
+        submit(value);
         return;
       }
       if (key.upArrow || key.downArrow) {
@@ -92,7 +129,11 @@ export function Input({ active, placeholder, onSubmit, onChange, onCtrlC }: Prop
   const before = value.slice(0, cursor);
   const at = value[cursor] ?? " ";
   const after = value.slice(cursor + 1);
+  const start = Math.max(0, Math.min(sel - Math.floor(MENU_ROWS / 2), menu.length - MENU_ROWS));
+  const visible = menu.slice(start, start + MENU_ROWS);
+  const nameWidth = Math.max(...menu.map((m) => m.name.length + (m.args ? m.args.length + 1 : 0)), 0) + 2;
   return (
+    <Box flexDirection="column">
     <Box borderStyle="round" borderColor={active ? "gray" : "blackBright"} paddingX={1}>
       <Text color="cyan">{"> "}</Text>
       {value === "" && placeholder ? (
@@ -107,6 +148,23 @@ export function Input({ active, placeholder, onSubmit, onChange, onCtrlC }: Prop
           {at === "\n" ? "\n" : ""}
           {after}
         </Text>
+      )}
+    </Box>
+      {active && menu.length > 0 && (
+        <Box flexDirection="column" paddingX={2}>
+          {start > 0 && <Text dimColor>  ↑ {start} more</Text>}
+          {visible.map((s, k) => {
+            const isSel = start + k === sel;
+            return (
+              <Text key={s.name} color={isSel ? "cyan" : undefined} dimColor={!isSel}>
+                {isSel ? "❯ " : "  "}
+                {`/${s.name}${s.args ? ` ${s.args}` : ""}`.padEnd(nameWidth + 1)}
+                {s.description}
+              </Text>
+            );
+          })}
+          {start + MENU_ROWS < menu.length && <Text dimColor>  ↓ {menu.length - start - MENU_ROWS} more</Text>}
+        </Box>
       )}
     </Box>
   );

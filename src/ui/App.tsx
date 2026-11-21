@@ -11,7 +11,7 @@ import { listSessions, resumeInto, Session, type SessionInfo } from "../agent/se
 import { formatElapsed, formatTokens } from "./format.js";
 import { messagesToItems } from "./history.js";
 import { SessionPicker } from "./SessionPicker.js";
-import { Input } from "./Input.js";
+import { Input, type Suggestion } from "./Input.js";
 import { PermissionDialog } from "./PermissionDialog.js";
 import { ItemView, ToolCard, type Item } from "./Transcript.js";
 
@@ -69,7 +69,6 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
   const [now, setNow] = useState(Date.now());
   const [pending, setPending] = useState<{ req: PermissionRequest; resolve(a: AskAnswer): void } | undefined>();
   const [mode, setModeState] = useState<PermissionMode>(agent.permissions.mode);
-  const [inputValue, setInputValue] = useState("");
   const [, setUsageTick] = useState(0);
   const abortRef = useRef<AbortController | undefined>(undefined);
   const lastCtrlC = useRef(0);
@@ -277,7 +276,6 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
   };
 
   const ctxPct = agent.lastInputTokens ? Math.round((agent.lastInputTokens / agent.contextWindow) * 100) : 0;
-  const suggestions = inputValue.startsWith("/") && !inputValue.includes(" ") ? matchCommands(inputValue) : [];
 
   return (
     <Box flexDirection="column">
@@ -342,15 +340,9 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
           active={!pending && !((sessions || pickingModel) && !busy)}
           placeholder={busy ? "Working… (type /help, or Esc to interrupt)" : "Ask Forge to do something"}
           onSubmit={submit}
-          onChange={setInputValue}
           onCtrlC={onCtrlC}
+          suggest={slashSuggestions}
         />
-        {suggestions.map((c) => (
-          <Text key={c.name} dimColor>
-            {"  "}/{c.name}
-            {c.args ? ` ${c.args}` : ""} <Text color="gray">— {c.description}</Text>
-          </Text>
-        ))}
         <Box justifyContent="space-between" paddingX={1}>
           <Text color={mode === "default" ? "gray" : mode === "plan" ? "cyan" : mode === "bypass" ? "red" : "yellow"}>
             {mode === "default" ? "" : "⏵⏵ "}
@@ -364,6 +356,11 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
       </Box>
     </Box>
   );
+}
+
+/** Slash-menu entries while typing a command name (before any space). */
+function slashSuggestions(value: string): Suggestion[] {
+  return value.startsWith("/") && !/\s/.test(value) ? matchCommands(value) : [];
 }
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
