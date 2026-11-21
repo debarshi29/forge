@@ -139,9 +139,12 @@ export async function switchTo(spec: string, ctx: Pick<CommandContext, "agent" |
   }
 }
 
+/** Commands for the slash menu: name-prefix matches first, then names containing the text. */
 export function matchCommands(prefix: string): SlashCommand[] {
   const p = prefix.replace(/^\//, "").split(/\s/)[0]!.toLowerCase();
-  return COMMANDS.filter((c) => c.name.startsWith(p));
+  const starts = COMMANDS.filter((c) => c.name.startsWith(p));
+  const contains = COMMANDS.filter((c) => !c.name.startsWith(p) && c.name.includes(p));
+  return [...starts, ...contains];
 }
 
 /** Parse "/name args". Returns undefined when the text is not a command. */

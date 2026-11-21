@@ -153,6 +153,50 @@ describe("TUI", () => {
     await until(() => stdout.text().includes("Switched to"));
   });
 
+  it("shows matching commands while typing and navigates them with arrow keys", async () => {
+    const opened: string[] = [];
+    const { stdout, type } = await mount([], "default", {
+      extra: {
+        listModels: async () => {
+          opened.push("picker");
+          return [{ spec: "fake:fake", provider: "ollama", label: "fake", available: true }];
+        },
+      },
+    });
+    await type("/mod");
+    await until(() => /❯ \/mode\b/.test(stdout.text()) && stdout.text().includes("/models"));
+    expect(stdout.text()).toContain("/model [provider:model]");
+
+    // Down twice: /mode → /model → /models, then Enter runs it.
+    await type("\x1b[B");
+    await type("\x1b[B");
+    await until(() => /❯ \/models/.test(stdout.text()));
+    await type("\r");
+    await until(() => opened.length === 1 && stdout.text().includes("Select a model"));
+  });
+
+  it("scrolls a long command list to keep the selection visible", async () => {
+    const { stdout, type } = await mount([]);
+    await type("/");
+    await until(() => /↓ \d+ more/.test(stdout.text()));
+    for (let i = 0; i < 8; i++) await type("\x1b[B");
+    await until(() => /↑ \d+ more/.test(stdout.text()));
+  });
+
+  it("wraps around, completes with Tab and closes with Esc", async () => {
+    const { stdout, type } = await mount([]);
+    await type("/mod");
+    await until(() => /❯ \/mode\b/.test(stdout.text()));
+    await type("\x1b[A"); // up from the first entry wraps to the last
+    await until(() => /❯ \/models/.test(stdout.text()));
+    await type("\t");
+    await until(() => stdout.text().includes("> /models"));
+    await type("\x1b");
+    await sleep(50);
+    await type("\r"); // menu closed: Enter submits the typed text as-is
+    await until(() => stdout.text().includes("Model: fake:fake"));
+  });
+
   it("runs slash commands", async () => {
     const { stdout, type } = await mount([]);
     await type("/help\r");
