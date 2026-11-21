@@ -1,0 +1,238 @@
+import type { Permissions } from "../permissions/index.js";
+import { ProviderStreamError } from "../providers/errors.js";
+import type {
+  Block,
+  Message,
+  Provider,
+  StopReason,
+  StreamEvent,
+  ToolResultBlock,
+  ToolUseBlock,
+  Usage,
+} from "../providers/types.js";
+import { toToolSpec } from "../tools/registry.js";
+import { ToolError, type Tool, type ToolContext, type ToolResult } from "../tools/types.js";
+
+export const MAX_TOOL_OUTPUT = 30_000;
+const MAX_STREAM_RETRIES = 2;
+
+export type AgentEvent =
+  | Exclude<StreamEvent, { type: "message_end" }>
+  | { type: "assistant_message"; message: Message; stop: StopReason; usage: Usage }
+  | { type: "tool_start"; id: string; name: string; input: unknown; summary: string }
+  | { type: "tool_end"; id: string; name: string; result: ToolResult }
+  | { type: "retry"; attempt: number; reason: string }
+  | { type: "done"; stop: StopReason | "aborted"; text: string; detail?: string };
+
+export interface AgentOptions {
+  provider: Provider;
+  model: string;
+  system: string;
+  tools: Tool[];
+  permissions: Permissions;
+  root: string;
+  cwd?: string;
+  maxTokens?: number;
+  messages?: Message[];
+}
+
+export class Agent {
+  readonly messages: Message[];
+  readonly usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  /** Input tokens of the most recent request: the current context size. */
+  lastInputTokens = 0;
+  private readonly toolCtx: Omit<ToolContext, "signal">;
+
+  constructor(private readonly opts: AgentOptions) {
+    this.messages = opts.messages ?? [];
+    const cwd = opts.cwd ?? opts.root;
+    this.toolCtx = { root: opts.root, cwd, fileState: new Map(), shell: { cwd } };
+  }
+
+  get model(): string {
+    return this.opts.model;
+  }
+
+  /** Run one user prompt to completion, yielding events for the UI. */
+  async *send(prompt: string | Block[], signal: AbortSignal = new AbortController().signal): AsyncGenerator<AgentEvent> {
+    this.pushUser(typeof prompt === "string" ? [{ type: "text", text: prompt }] : prompt);
+    const toolSpecs = this.opts.tools.map(toToolSpec);
+
+    while (true) {
+      // --- stream one assistant turn (re-issued on retryable stream errors) ---
+      let end: Extract<StreamEvent, { type: "message_end" }> | undefined;
+      for (let attempt = 0; !end; attempt++) {
+        try {
+          for await (const ev of this.opts.provider.stream({
+            model: this.opts.model,
+            system: this.opts.system,
+            messages: this.messages,
+            tools: toolSpecs,
+            maxTokens: this.opts.maxTokens,
+            signal,
+          })) {
+            if (ev.type === "message_end") end = ev;
+            else yield ev;
+          }
+          if (!end) throw new ProviderStreamError("stream ended without a final message", true);
+        } catch (err) {
+          if (signal.aborted) {
+            yield { type: "done", stop: "aborted", text: "" };
+            return;
+          }
+          if (err instanceof ProviderStreamError && err.retryable && attempt < MAX_STREAM_RETRIES) {
+            yield { type: "retry", attempt: attempt + 1, reason: err.message };
+            continue;
+          }
+          throw err;
+        }
+      }
+
+      this.addUsage(end.usage);
+      this.messages.push(end.message); // verbatim, never edited afterwards
+      yield { type: "assistant_message", message: end.message, stop: end.stop, usage: end.usage };
+
+      const toolUses = end.message.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
+      const text = end.message.content
+        .filter((b) => b.type === "text")
+        .map((b) => b.text)
+        .join("");
+
+      if (end.stop === "pause" && toolUses.length === 0) continue; // server asked us to resume
+      if (end.stop === "refusal" || toolUses.length === 0) {
+        yield { type: "done", stop: end.stop, text, ...(end.detail ? { detail: end.detail } : {}) };
+        return;
+      }
+
+      // --- run tools ---
+      let results: ToolResultBlock[];
+      if (end.stop === "max_tokens") {
+        // A tool input cut off by max_tokens may still parse: never run it.
+        results = toolUses.map((t) =>
+          errorResult(t.id, "Your output hit max_tokens before this tool call finished, so it was not run. Split the work into smaller calls."),
+        );
+      } else {
+        results = yield* this.runTools(toolUses, signal);
+      }
+      this.pushUser(results);
+      if (signal.aborted) {
+        yield { type: "done", stop: "aborted", text };
+        return;
+      }
+    }
+  }
+
+  private async *runTools(calls: ToolUseBlock[], signal: AbortSignal): AsyncGenerator<AgentEvent, ToolResultBlock[]> {
+    const results = new Map<string, ToolResultBlock>();
+    // Consecutive read-only calls run in parallel; mutating calls run one at a time.
+    const batches: ToolUseBlock[][] = [];
+    for (const call of calls) {
+      const last = batches.at(-1);
+      if (last && this.isReadOnly(call) && last.every((c) => this.isReadOnly(c))) last.push(call);
+      else batches.push([call]);
+    }
+
+    for (const batch of batches) {
+      if (signal.aborted) break;
+      const events: AgentEvent[] = [];
+      for (const call of batch) {
+        const tool = this.findTool(call.name);
+        events.push({
+          type: "tool_start",
+          id: call.id,
+          name: call.name,
+          input: call.input,
+          summary: safeSummary(tool, call.input),
+        });
+      }
+      yield* events;
+      const done = await Promise.all(batch.map((call) => this.runOne(call, signal)));
+      for (const [i, result] of done.entries()) {
+        const call = batch[i]!;
+        results.set(call.id, toResultBlock(call.id, result));
+        yield { type: "tool_end", id: call.id, name: call.name, result };
+      }
+    }
+
+    // Every tool_use needs a result, including those skipped by an abort.
+    return calls.map((c) => results.get(c.id) ?? errorResult(c.id, "Interrupted by the user before this tool ran."));
+  }
+
+  private async runOne(call: ToolUseBlock, signal: AbortSignal): Promise<ToolResult> {
+    const tool = this.findTool(call.name);
+    if (!tool) return { content: `Unknown tool "${call.name}"`, isError: true };
+
+    const parsed = tool.schema.safeParse(call.input);
+    if (!parsed.success) {
+      return {
+        content: `Invalid input for ${call.name}: ${parsed.error.issues
+          .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+          .join("; ")}. Raw input: ${truncate(JSON.stringify(call.input), 2000)}`,
+        isError: true,
+      };
+    }
+
+    const decision = await this.opts.permissions.check(tool, parsed.data);
+    if (!decision.allow) return { content: decision.reason, isError: true };
+    if (signal.aborted) return { content: "Interrupted by the user.", isError: true };
+
+    try {
+      const result = await tool.run(parsed.data, { ...this.toolCtx, signal });
+      return typeof result.content === "string" ? { ...result, content: truncate(result.content, MAX_TOOL_OUTPUT) } : result;
+    } catch (err) {
+      if (signal.aborted) return { content: "Interrupted by the user.", isError: true };
+      const msg = err instanceof ToolError ? err.message : `${call.name} failed: ${err instanceof Error ? err.message : String(err)}`;
+      return { content: msg, isError: true };
+    }
+  }
+
+  private findTool(name: string): Tool | undefined {
+    return this.opts.tools.find((t) => t.name === name);
+  }
+
+  private isReadOnly(call: ToolUseBlock): boolean {
+    return this.findTool(call.name)?.readOnly ?? false;
+  }
+
+  /** Append user content, merging into a trailing user message (keeps roles alternating). */
+  private pushUser(content: Block[]): void {
+    const last = this.messages.at(-1);
+    if (last?.role === "user") {
+      // Tool results must come first in a user turn.
+      const all = [...last.content, ...content];
+      last.content = [...all.filter((b) => b.type === "tool_result"), ...all.filter((b) => b.type !== "tool_result")];
+    } else {
+      this.messages.push({ role: "user", content });
+    }
+  }
+
+  private addUsage(u: Usage): void {
+    this.usage.inputTokens += u.inputTokens;
+    this.usage.outputTokens += u.outputTokens;
+    this.usage.cacheReadTokens = (this.usage.cacheReadTokens ?? 0) + (u.cacheReadTokens ?? 0);
+    this.usage.cacheWriteTokens = (this.usage.cacheWriteTokens ?? 0) + (u.cacheWriteTokens ?? 0);
+    this.lastInputTokens = u.inputTokens;
+  }
+}
+
+function toResultBlock(id: string, r: ToolResult): ToolResultBlock {
+  return { type: "tool_result", toolUseId: id, content: r.content, ...(r.isError ? { isError: true } : {}) };
+}
+
+function errorResult(id: string, message: string): ToolResultBlock {
+  return { type: "tool_result", toolUseId: id, content: message, isError: true };
+}
+
+function safeSummary(tool: Tool | undefined, input: unknown): string {
+  try {
+    return tool?.summarize?.(input as never) ?? truncate(JSON.stringify(input), 200);
+  } catch {
+    return truncate(JSON.stringify(input), 200);
+  }
+}
+
+export function truncate(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const half = Math.floor(max / 2);
+  return `${s.slice(0, half)}\n\n[… output truncated: ${s.length - max} of ${s.length} characters omitted …]\n\n${s.slice(-half)}`;
+}
