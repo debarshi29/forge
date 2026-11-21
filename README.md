@@ -56,8 +56,27 @@ The conversation carries over: each provider replays its own turns verbatim and 
 | OpenAI | `openai:gpt-5` | `OPENAI_API_KEY`; `"openai": {"baseURL": "…"}` for other compatible endpoints |
 | LM Studio | `lmstudio:<model>` | LM Studio's server on `localhost:1234` |
 
-Local models have small context windows; set `"ollama": {"contextWindow": 32768}` to match yours. Small local models
-that write tool calls as JSON text instead of using native tool calls are handled too.
+Ollama runs models with a 4k-token context unless told otherwise, which is too small for an agent (Forge's
+instructions and tool definitions alone take about 4k). Forge reads the real figure from Ollama and warns when it is
+below 16k. Raise it with `OLLAMA_CONTEXT_LENGTH` and restart Ollama:
+
+```sh
+setx OLLAMA_CONTEXT_LENGTH 16384            # Windows
+export OLLAMA_CONTEXT_LENGTH=16384          # macOS / Linux (e.g. in your shell profile)
+```
+
+`"ollama": {"contextWindow": …}` only changes what Forge assumes, not what Ollama runs. Small local models that write
+tool calls as JSON text instead of using native tool calls are handled too.
+
+### Context and tasks
+
+- **Compaction.** When the conversation reaches 80% of the context window, Forge summarizes the older turns and keeps
+  recent ones as they are, so long sessions keep going. `/compact [focus]` does it now, optionally steering the summary
+  ("/compact the failing auth tests"). Turn it off with `"autoCompact": false`, or move the trigger with
+  `"compactThreshold": 0.7`.
+- **`/context`** shows what fills the window: system prompt, memory files, tool definitions, messages and tool results.
+- **Tasks.** For multi-step work Forge keeps a task list (the `todo_write` tool), shown live above the prompt. Ctrl+T
+  hides or shows it; `/todos` prints it. The list survives compaction and `--resume`.
 
 ### Sessions
 

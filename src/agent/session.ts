@@ -6,11 +6,15 @@ import type { Message, Usage } from "../providers/types.js";
 import { costOf } from "./cost.js";
 import { appendUser } from "./history.js";
 import type { Agent, Recorder } from "./loop.js";
+import type { Todo } from "../tools/todo.js";
 
 type Record =
   | { t: "meta"; v: 1; id: string; root: string; model: string; created: string }
   | { t: "msg"; m: Message }
-  | { t: "usage"; model: string; u: Usage };
+  | { t: "usage"; model: string; u: Usage; side?: true }
+  /** History was compacted: from here on the conversation is `m`. */
+  | { t: "compact"; m: Message[] }
+  | { t: "todos"; todos: Todo[] };
 
 export interface SessionInfo {
   id: string;
@@ -29,6 +33,9 @@ export interface LoadedSession {
   usage: Usage;
   costUSD: number;
   lastInputTokens: number;
+  todos: Todo[];
+  /** Times the conversation was compacted. */
+  compactions: number;
   /** Synthetic results added by repairHistory; persist them when continuing. */
   repaired?: Message;
 }
@@ -76,9 +83,17 @@ export class Session implements Recorder {
     this.write({ t: "msg", m });
   }
 
-  usage(model: string, u: Usage): void {
+  usage(model: string, u: Usage, side?: boolean): void {
     this.model = model;
-    this.write({ t: "usage", model, u });
+    this.write({ t: "usage", model, u, ...(side ? { side: true as const } : {}) });
+  }
+
+  compact(m: Message[]): void {
+    this.write({ t: "compact", m });
+  }
+
+  todos(todos: Todo[]): void {
+    this.write({ t: "todos", todos });
   }
 
   private write(rec: Record): void {
@@ -146,17 +161,29 @@ export function loadSession(file: string): LoadedSession {
   let costUSD = 0;
   let lastInputTokens = 0;
   let model = meta?.model ?? "unknown";
+  let todos: Todo[] = [];
+  let compactions = 0;
+  let title: string | undefined;
   for (const rec of records) {
     if (rec.t === "msg") {
       if (rec.m.role === "user") appendUser(messages, rec.m.content);
       else messages.push(rec.m);
+    } else if (rec.t === "compact") {
+      // Keep the first prompt as the title even after the history is replaced.
+      title ??= titleOf(messages);
+      messages.length = 0;
+      messages.push(...structuredClone(rec.m));
+      lastInputTokens = 0;
+      compactions++;
+    } else if (rec.t === "todos") {
+      todos = rec.todos;
     } else if (rec.t === "usage") {
       usage.inputTokens += rec.u.inputTokens;
       usage.outputTokens += rec.u.outputTokens;
       usage.cacheReadTokens! += rec.u.cacheReadTokens ?? 0;
       usage.cacheWriteTokens! += rec.u.cacheWriteTokens ?? 0;
       costUSD += costOf(rec.model, rec.u) ?? 0;
-      lastInputTokens = rec.u.inputTokens;
+      if (!rec.side) lastInputTokens = rec.u.inputTokens;
       model = rec.model;
     }
   }
@@ -171,13 +198,16 @@ export function loadSession(file: string): LoadedSession {
       created: meta ? new Date(meta.created) : stat.birthtime,
       updated: stat.mtime,
       model,
-      title: titleOf(messages),
+      title: title ?? titleOf(messages),
       messages: messages.length,
     },
     messages,
     usage,
     costUSD,
+    // After a compaction the stored figure no longer matches the history.
     lastInputTokens,
+    todos,
+    compactions,
   };
 }
 

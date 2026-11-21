@@ -11,7 +11,7 @@ export async function resolveModelForUse(
   spec: string,
   settings: ProviderSettings = {},
   env: NodeJS.ProcessEnv = process.env,
-): Promise<ResolvedModel> {
+): Promise<ResolvedModel & { warning?: string }> {
   const isOllama = spec === AUTO_OLLAMA || spec === `${AUTO_OLLAMA}:` || spec.startsWith(`${AUTO_OLLAMA}:`);
   if (!isOllama) return resolveModel(spec, settings);
 
@@ -27,8 +27,50 @@ export async function resolveModelForUse(
     name = pick.name;
   }
   const info = installed?.find((m) => m.name === name || m.name === `${name}:latest`);
-  const contextWindow = settings.ollama?.contextWindow ?? info?.contextLength;
-  return resolveModel(`${AUTO_OLLAMA}:${name}`, { ...settings, ollama: { ...settings.ollama, baseURL, ...(contextWindow ? { contextWindow } : {}) } });
+  // What the server actually runs with, which is often far below the model's maximum.
+  const runtime = installed === undefined ? undefined : await ollamaRuntimeContext(baseURL, name, env);
+  const fromServer = runtime ? Math.min(runtime.tokens, info?.contextLength ?? Infinity) : info?.contextLength;
+  const contextWindow = settings.ollama?.contextWindow ?? fromServer;
+  const resolved = resolveModel(`${AUTO_OLLAMA}:${name}`, { ...settings, ollama: { ...settings.ollama, baseURL, ...(contextWindow ? { contextWindow } : {}) } });
+  let warning: string | undefined;
+  if (!settings.ollama?.contextWindow && runtime && runtime.tokens < MIN_USEFUL_CONTEXT && (info?.contextLength ?? Infinity) > runtime.tokens) {
+    const k = Math.round(runtime.tokens / 1024);
+    warning =
+      `Ollama runs ${name} with only a ${k}k-token context${runtime.source === "default" ? " (Ollama's default)" : ""}, and Forge's instructions and tools alone take about 4k, so the model will lose track of the conversation. ` +
+      `Give it more room: ${process.platform === "win32" ? "setx OLLAMA_CONTEXT_LENGTH 16384" : "export OLLAMA_CONTEXT_LENGTH=16384"}, then restart Ollama (and Forge).`;
+  }
+  return { ...resolved, ...(warning ? { warning } : {}) };
+}
+
+/** Ollama's context length when nothing configures it. */
+export const OLLAMA_DEFAULT_CONTEXT = 4096;
+/** Below this, Forge's system prompt and tools leave too little room to work. */
+export const MIN_USEFUL_CONTEXT = 16_384;
+
+/**
+ * The context length the Ollama server uses for a model: the loaded model's
+ * (from /api/ps), else OLLAMA_CONTEXT_LENGTH, else Ollama's default.
+ */
+export async function ollamaRuntimeContext(
+  baseURL: string,
+  name: string,
+  env: NodeJS.ProcessEnv = process.env,
+  timeoutMs = 1500,
+): Promise<{ tokens: number; source: "loaded" | "env" | "default" }> {
+  const root = baseURL.replace(/\/v1\/?$/, "");
+  try {
+    const res = await fetch(`${root}/api/ps`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (res.ok) {
+      const body = (await res.json()) as { models?: Array<{ name: string; model?: string; context_length?: number }> };
+      const m = body.models?.find((x) => x.name === name || x.model === name || x.name === `${name}:latest`);
+      if (m?.context_length) return { tokens: m.context_length, source: "loaded" };
+    }
+  } catch {
+    // fall through
+  }
+  const fromEnv = Number.parseInt(env.OLLAMA_CONTEXT_LENGTH ?? "", 10);
+  if (fromEnv > 0) return { tokens: fromEnv, source: "env" };
+  return { tokens: OLLAMA_DEFAULT_CONTEXT, source: "default" };
 }
 
 /** One entry in the /model picker. */

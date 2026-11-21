@@ -1,3 +1,4 @@
+import { COMPACT_MARKER } from "../agent/compact.js";
 import { isReminder } from "../agent/loop.js";
 import type { Message, ToolResultBlock } from "../providers/types.js";
 import type { Tool } from "../tools/types.js";
@@ -13,7 +14,9 @@ export function messagesToItems(messages: Message[], tools: Tool[]): ItemInput[]
   const items: ItemInput[] = [];
   for (const m of messages) {
     for (const b of m.content) {
-      if (b.type === "text" && b.text.trim() && !isReminder(b.text)) {
+      if (b.type === "text" && b.text.includes(COMPACT_MARKER)) {
+        items.push({ kind: "info", text: "✂ Earlier turns were compacted into a summary." });
+      } else if (b.type === "text" && b.text.trim() && !isReminder(b.text)) {
         items.push(m.role === "user" ? { kind: "user", text: b.text } : { kind: "assistant", text: b.text });
       } else if (b.type === "tool_use") {
         const tool = tools.find((t) => t.name === b.name);

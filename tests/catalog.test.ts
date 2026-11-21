@@ -6,12 +6,13 @@ import { listModelOptions, pickDefaultOllamaModel, resolveModelForUse } from "..
 let server: http.Server;
 let baseURL: string;
 let tags: unknown = { models: [] };
+let ps: unknown = { models: [] };
 
 beforeAll(async () => {
   server = http.createServer((req, res) => {
-    if (req.url === "/api/tags") {
+    if (req.url === "/api/tags" || req.url === "/api/ps") {
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify(tags));
+      res.end(JSON.stringify(req.url === "/api/ps" ? ps : tags));
     } else {
       res.statusCode = 404;
       res.end();
@@ -42,17 +43,31 @@ describe("default Ollama model", () => {
     expect(pickDefaultOllamaModel([])).toBeUndefined();
   });
 
-  it('resolves "ollama" to an installed model with its real context window', async () => {
+  it('resolves "ollama" to an installed model, using the context the server really runs with', async () => {
     tags = installed;
-    const r = await resolveModelForUse("ollama", { ollama: { baseURL } });
+    ps = { models: [] };
+    const noEnv = {};
+    // Not loaded and nothing configured: Ollama's 4k default, with a warning.
+    const r = await resolveModelForUse("ollama", { ollama: { baseURL } }, noEnv);
     expect(r.spec).toBe("ollama:qwen2.5-coder:3b");
-    expect(r.provider.capabilities(r.model).contextWindow).toBe(32768);
+    expect(r.provider.capabilities(r.model).contextWindow).toBe(4096);
+    expect(r.warning).toMatch(/only a 4k-token context \(Ollama's default\).*OLLAMA_CONTEXT_LENGTH 16384|OLLAMA_CONTEXT_LENGTH=16384/);
 
-    const explicit = await resolveModelForUse("ollama:llama3.2:1b", { ollama: { baseURL } });
-    expect(explicit.provider.capabilities(explicit.model).contextWindow).toBe(131072);
+    // OLLAMA_CONTEXT_LENGTH raises it, capped at the model's maximum.
+    const env = await resolveModelForUse("ollama", { ollama: { baseURL } }, { OLLAMA_CONTEXT_LENGTH: "65536" });
+    expect(env.provider.capabilities(env.model).contextWindow).toBe(32768);
+    expect(env.warning).toBeUndefined();
 
-    const override = await resolveModelForUse("ollama", { ollama: { baseURL, contextWindow: 8000 } });
+    // A loaded model reports its real context.
+    ps = { models: [{ name: "llama3.2:1b", model: "llama3.2:1b", context_length: 24576 }] };
+    const loaded = await resolveModelForUse("ollama:llama3.2:1b", { ollama: { baseURL } }, noEnv);
+    expect(loaded.provider.capabilities(loaded.model).contextWindow).toBe(24576);
+    expect(loaded.warning).toBeUndefined();
+
+    // An explicit setting wins and silences the warning.
+    const override = await resolveModelForUse("ollama", { ollama: { baseURL, contextWindow: 8000 } }, noEnv);
     expect(override.provider.capabilities(override.model).contextWindow).toBe(8000);
+    expect(override.warning).toBeUndefined();
   });
 
   it("explains what to do when Ollama is missing or empty", async () => {

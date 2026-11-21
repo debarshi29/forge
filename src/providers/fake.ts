@@ -24,10 +24,11 @@ export class FakeProvider implements Provider {
   constructor(
     private readonly turns: FakeTurn[],
     readonly name = "fake",
+    private readonly window = 100_000,
   ) {}
 
   capabilities(): ProviderCapabilities {
-    return { thinking: false, caching: false, parallelTools: true, contextWindow: 100_000 };
+    return { thinking: false, caching: false, parallelTools: true, contextWindow: this.window };
   }
 
   async *stream(req: StreamRequest): AsyncIterable<StreamEvent> {

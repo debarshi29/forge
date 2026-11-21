@@ -65,6 +65,7 @@ const program = new Command()
     const { provider, model } = resolved;
 
     const headless = flags.print !== undefined;
+    if (resolved.warning && headless) process.stderr.write(`\x1b[33m⚠ ${resolved.warning}\x1b[0m\n`);
     const tty = Boolean(process.stdin.isTTY);
     // Headless: ask on stderr with readline. Interactive: the TUI's dialog.
     const rl = headless && tty ? readline.createInterface({ input: process.stdin, output: process.stderr }) : undefined;
@@ -101,6 +102,8 @@ const program = new Command()
       root,
       maxTokens: config.maxTokens,
       hooks: new Hooks(config.hooks, root),
+      autoCompact: config.autoCompact,
+      compactThreshold: config.compactThreshold,
     });
 
     // Sessions: --continue (latest), --resume <id>, or --resume alone (picker).
@@ -129,6 +132,7 @@ const program = new Command()
         if (pickSession && headless) throw new Error("--resume needs a session id in -p mode (or use --continue)");
       }
     }
+    if (resolved.warning && !headless) initialItems = [...(initialItems ?? []), { kind: "info", text: `⚠ ${resolved.warning}`, tone: "warn" }];
 
     if (flags.print !== undefined) {
       const ok = await runPrompt(agent, flags.print, flags.output);
@@ -156,6 +160,7 @@ const program = new Command()
         switchModel: async (spec: string) => {
           const next = await resolveModelForUse(spec, providerSettings);
           agent.setModel(next.provider, next.model, buildSystemPrompt({ root, cwd: root, model: next.spec, memory }));
+          return next.warning ? { warning: next.warning } : undefined;
         },
         listModels: () => listModelOptions(providerSettings),
         initialTheme: findTheme(config.theme) ?? DEFAULT_THEME,
@@ -232,6 +237,16 @@ function renderText(ev: AgentEvent): void {
       const text = typeof ev.result.content === "string" ? ev.result.content : "[image]";
       const preview = text.split("\n").slice(0, 4).join("\n  ");
       process.stderr.write(`  ${ev.result.isError ? "\x1b[31m" : "\x1b[2m"}${preview}${text.split("\n").length > 4 ? " …" : ""}\x1b[0m\n`);
+      break;
+    }
+    case "compact":
+      if (ev.phase === "start") process.stderr.write(dim(`\n[compacting the conversation (~${ev.tokens} tokens)…]\n`));
+      else if (ev.phase === "end") process.stderr.write(dim(`[compacted: ~${ev.before} → ~${ev.after} tokens]\n`));
+      else process.stderr.write(`\x1b[33m[${ev.message}]\x1b[0m\n`);
+      break;
+    case "todos": {
+      const mark = { pending: "☐", in_progress: "◐", completed: "✔" } as const;
+      process.stderr.write(dim(`  ${ev.todos.map((t) => `${mark[t.status]} ${t.content}`).join("\n  ")}\n`));
       break;
     }
     case "hook":

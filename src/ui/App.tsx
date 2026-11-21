@@ -1,6 +1,8 @@
 import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Agent } from "../agent/loop.js";
+import type { Agent, AgentEvent } from "../agent/loop.js";
+import type { Todo } from "../tools/todo.js";
+import { TaskPanel } from "./TaskPanel.js";
 import { matchCommands, parseCommand, switchTo, type CommandContext } from "../commands/index.js";
 import type { ModelOption } from "../providers/catalog.js";
 import { ModelPicker } from "./ModelPicker.js";
@@ -47,7 +49,7 @@ interface Props {
   memory?: MemoryFile[];
   env?: NodeJS.ProcessEnv;
   /** Switch provider/model (wired by the CLI, which knows the settings). */
-  switchModel?(spec: string): Promise<void>;
+  switchModel?(spec: string): Promise<void | { warning?: string }>;
   /** Models for the /model picker (wired by the CLI). */
   listModels?(): Promise<ModelOption[]>;
   /** Theme to start with. */
@@ -98,6 +100,9 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
   const [liveThinking, setLiveThinking] = useState("");
   const [running, setRunning] = useState<Array<{ id: string; name: string; summary: string }>>([]);
   const [busy, setBusy] = useState(false);
+  const [todos, setTodos] = useState<Todo[]>(agent.todos);
+  const [showTasks, setShowTasks] = useState(true);
+  const [compacting, setCompacting] = useState(false);
   const [startedAt, setStartedAt] = useState(0);
   const [now, setNow] = useState(Date.now());
   const [pending, setPending] = useState<{ req: PermissionRequest; resolve(a: AskAnswer): void } | undefined>();
@@ -148,8 +153,8 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     return () => clearInterval(t);
   }, [busy]);
 
-  const runTurn = useCallback(
-    async (prompt: string) => {
+  const runStream = useCallback(
+    async (make: (signal: AbortSignal) => AsyncGenerator<AgentEvent, unknown>) => {
       const ac = new AbortController();
       abortRef.current = ac;
       setBusy(true);
@@ -157,7 +162,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
       setVerb(t.verbs[Math.floor(Math.random() * t.verbs.length)]!);
       setNow(Date.now());
       try {
-        for await (const ev of agent.send(prompt, ac.signal)) {
+        for await (const ev of make(ac.signal)) {
           switch (ev.type) {
             case "thinking_delta":
               thinkBuf.current += ev.text;
@@ -187,6 +192,23 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
               push({ kind: "tool", name: ev.name, summary: summaries.current.get(ev.id) ?? "", result: ev.result });
               summaries.current.delete(ev.id);
               break;
+            case "compact":
+              if (ev.phase === "start") {
+                flush();
+                setCompacting(true);
+              } else {
+                setCompacting(false);
+                if (ev.phase === "end") {
+                  push({ kind: "info", text: `✂ Compacted the conversation: ~${formatTokens(ev.before)} → ~${formatTokens(ev.after)} tokens. Older turns are summarized; recent ones are kept as-is.` });
+                } else {
+                  push({ kind: "info", text: ev.message, tone: "warn" });
+                }
+              }
+              setUsageTick((n) => n + 1);
+              break;
+            case "todos":
+              setTodos([...ev.todos]);
+              break;
             case "hook":
               flush();
               push({ kind: "info", text: `⚓ ${ev.text}`, tone: ev.tone === "info" ? "info" : ev.tone });
@@ -212,11 +234,13 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
         abortRef.current = undefined;
         setRunning([]);
         setBusy(false);
+        setCompacting(false);
         setUsageTick((n) => n + 1);
       }
     },
     [agent, flush, push],
   );
+  const runTurn = useCallback((prompt: string) => runStream((signal) => agent.send(prompt, signal)), [agent, runStream]);
 
   const resetTranscript = (extra: ItemInput[] = []) => {
     // Static output can't be erased; clear the screen and start a new Static.
@@ -232,6 +256,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     setSessions(undefined);
     try {
       const loaded = resumeInto(agent, root, info, env);
+      setTodos([...agent.todos]);
       resetTranscript([
         ...messagesToItems(loaded.messages, agent.tools),
         { kind: "info", text: `Resumed session ${info.id} (${loaded.messages.length} messages).` },
@@ -248,8 +273,9 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     memory,
     switchModel: switchModel
       ? async (spec: string) => {
-          await switchModel(spec);
+          const r = await switchModel(spec);
           setUsageTick((n) => n + 1);
+          return r;
         }
       : undefined,
     openModelPicker: listModels
@@ -275,7 +301,12 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     },
     themeName: theme.name,
     print: (text, tone) => push({ kind: "info", text, tone }),
-    clearTranscript: () => resetTranscript(),
+    clearTranscript: () => {
+      setTodos([]);
+      resetTranscript();
+    },
+    compact: (focus) => runStream((signal) => agent.compact({ ...(focus ? { focus } : {}), signal, reason: "manual" })),
+    busy,
     startNewSession: () => {
       if (agent.recorder) agent.setRecorder(new Session(root, agent.modelSpec, { env }));
     },
@@ -328,6 +359,10 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
       pokeRef.current?.();
       return;
     }
+    if (key.ctrl && input === "t") {
+      setShowTasks((v) => !v);
+      return;
+    }
     if (key.tab && key.shift) {
       const cycle = allowBypass ? [...MODE_CYCLE, "bypass" as const] : MODE_CYCLE;
       setMode(cycle[(cycle.indexOf(mode) + 1) % cycle.length]!);
@@ -377,7 +412,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
 
   const petStatus: PetStatus = busy ? "busy" : (petFlash?.status ?? "idle");
 
-  const ctxPct = agent.lastInputTokens ? Math.round((agent.lastInputTokens / agent.contextWindow) * 100) : 0;
+  const ctxPct = Math.min(100, Math.round((agent.contextTokens / agent.contextWindow) * 100));
 
   return (
     <ThemeContext.Provider value={t}>
@@ -410,7 +445,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
         <Box marginTop={1}>
           <Text color={t.accent}>{t.spinner[Math.floor(now / 120) % t.spinner.length]} </Text>
           <Text dimColor>
-            {running.length ? `Running ${running.map((r) => r.name).join(", ")}` : liveText ? "Writing" : verb}… (
+            {compacting ? "Compacting the conversation" : running.length ? `Running ${running.map((r) => r.name).join(", ")}` : liveText ? "Writing" : verb}… (
             {formatElapsed(now - startedAt)} · esc to interrupt)
           </Text>
         </Box>
@@ -475,6 +510,8 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
           }}
         />
       )}
+
+      {showTasks && todos.some((x) => x.status !== "completed") ? <TaskPanel todos={todos} spin={busy ? Math.floor(now / 250) : 0} /> : null}
 
       <Box marginTop={1} flexDirection="column">
         <Input

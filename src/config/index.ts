@@ -34,6 +34,10 @@ const SettingsSchema = z
     effort: z.enum(["low", "medium", "high", "xhigh", "max"]),
     permissionMode: z.enum(PERMISSION_MODES as [PermissionMode, ...PermissionMode[]]),
     maxTokens: z.number().int().positive(),
+    /** Summarize older turns near the context limit (default true). */
+    autoCompact: z.boolean(),
+    /** Fraction of the context window that triggers auto-compaction (default 0.8). */
+    compactThreshold: z.number().min(0.3).max(0.95),
     theme: z.string(),
     pet: z.string(),
     petName: z.string(),
@@ -60,6 +64,8 @@ export interface Config {
   effort: NonNullable<Settings["effort"]>;
   permissionMode: PermissionMode;
   maxTokens?: number;
+  autoCompact: boolean;
+  compactThreshold: number;
   theme?: string;
   pet?: string;
   petName?: string;
@@ -139,6 +145,8 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
     effort: merged.effort ?? "high",
     permissionMode: merged.permissionMode ?? "default",
     maxTokens: merged.maxTokens,
+    autoCompact: merged.autoCompact ?? true,
+    compactThreshold: merged.compactThreshold ?? 0.8,
     theme: merged.theme,
     pet: merged.pet,
     petName: merged.petName,
