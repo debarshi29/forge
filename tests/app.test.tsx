@@ -197,6 +197,31 @@ describe("TUI", () => {
     await until(() => stdout.text().includes("Model: fake:fake"));
   });
 
+  it("previews themes live in /themes and saves the one picked", async () => {
+    const saved: string[] = [];
+    const { stdout, type } = await mount([], "default", { extra: { saveTheme: (n: string) => saved.push(n) } });
+    await type("/themes\r");
+    await until(() => stdout.text().includes("Pick a theme") && stdout.text().includes("Synthwave"));
+    expect(stdout.text()).toContain("fix the failing test"); // the sample transcript
+    await sleep(100);
+    await type("\x1b[B"); // Forge → Ember (previewed, not saved yet)
+    await sleep(100);
+    expect(saved).toEqual([]);
+    await type("\r");
+    await until(() => stdout.text().includes("Theme set to Ember"));
+    expect(saved).toEqual(["ember"]);
+  });
+
+  it("sets a theme by name and rejects unknown ones", async () => {
+    const saved: string[] = [];
+    const { stdout, type } = await mount([], "default", { extra: { saveTheme: (n: string) => saved.push(n) } });
+    await type("/theme ocean\r");
+    await until(() => stdout.text().includes("Theme set to Ocean"));
+    await type("/theme plaid\r");
+    await until(() => stdout.text().includes('No theme "plaid"'));
+    expect(saved).toEqual(["ocean"]);
+  });
+
   it("runs slash commands", async () => {
     const { stdout, type } = await mount([]);
     await type("/help\r");

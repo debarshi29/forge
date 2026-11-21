@@ -1,4 +1,5 @@
 import { Box, Text, useInput } from "ink";
+import { useTheme } from "./theme.js";
 import { useState } from "react";
 import type { AskAnswer, PermissionRequest } from "../permissions/index.js";
 import { preview } from "./format.js";
@@ -23,6 +24,7 @@ function details(req: PermissionRequest): string {
 }
 
 export function PermissionDialog({ request, onAnswer }: Props) {
+  const t = useTheme();
   const [selected, setSelected] = useState(0);
   const [reason, setReason] = useState<string | undefined>(undefined);
 
@@ -44,15 +46,15 @@ export function PermissionDialog({ request, onAnswer }: Props) {
   });
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
-      <Text bold color="yellow">
+    <Box flexDirection="column" borderStyle="round" borderColor={t.warning} paddingX={1}>
+      <Text bold color={t.warning}>
         Allow {request.tool}?
       </Text>
       <Box marginY={1} paddingLeft={2}>
         <Text>{details(request)}</Text>
       </Box>
       {OPTIONS.map((o, i) => (
-        <Text key={o} color={i === selected ? "cyan" : undefined}>
+        <Text key={o} color={i === selected ? t.highlight : undefined}>
           {i === selected ? "❯ " : "  "}
           {i + 1}. {o}
         </Text>

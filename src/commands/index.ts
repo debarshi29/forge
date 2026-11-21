@@ -3,6 +3,7 @@ import { PERMISSION_MODES, type PermissionMode } from "../permissions/index.js";
 import { formatCost, priceFor } from "../agent/cost.js";
 import type { MemoryFile } from "../agent/memory.js";
 import { formatTokens } from "../ui/format.js";
+import { THEMES } from "../ui/theme.js";
 
 export interface CommandContext {
   agent: Agent;
@@ -19,6 +20,11 @@ export interface CommandContext {
   switchModel?(spec: string): Promise<void>;
   /** Open the interactive model list. */
   openModelPicker?(): void;
+  /** Open the theme picker (live preview). */
+  openThemePicker?(): void;
+  /** Apply and save a theme by name; false if there is no such theme. */
+  setTheme?(name: string): boolean;
+  themeName?: string;
 }
 
 export interface SlashCommand {
@@ -91,6 +97,33 @@ export const COMMANDS: SlashCommand[] = [
     run(_a, ctx) {
       if (ctx.openModelPicker) return ctx.openModelPicker();
       ctx.print(`Model: ${ctx.agent.modelSpec}`);
+    },
+  },
+  {
+    name: "theme",
+    args: "[name]",
+    description: "Pick a colour theme, or set one by name",
+    run(args, ctx) {
+      const name = args.trim();
+      if (!name) {
+        if (ctx.openThemePicker) return ctx.openThemePicker();
+        return ctx.print(`Theme: ${ctx.themeName ?? "forge"}`);
+      }
+      if (!ctx.setTheme) return ctx.print("Themes are not available here.", "warn");
+      if (!ctx.setTheme(name)) {
+        ctx.print(`No theme "${name}". Themes: ${THEMES.map((t) => t.name).join(", ")}`, "error");
+        return;
+      }
+      const t = THEMES.find((x) => x.name === name.toLowerCase())!;
+      ctx.print(`${t.icon} Theme set to ${t.label}.`);
+    },
+  },
+  {
+    name: "themes",
+    description: "Browse colour themes with a live preview",
+    run(_a, ctx) {
+      if (ctx.openThemePicker) return ctx.openThemePicker();
+      ctx.print(`Themes: ${THEMES.map((t) => t.name).join(", ")}`);
     },
   },
   {

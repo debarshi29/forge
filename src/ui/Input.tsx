@@ -1,4 +1,5 @@
 import { Box, Text, useInput } from "ink";
+import { useTheme } from "./theme.js";
 import { useRef, useState } from "react";
 
 /** An entry in the completion menu (slash commands). */
@@ -29,6 +30,7 @@ export const MENU_ROWS = 6;
  * highlighted entry, Tab completes it, and Esc closes the menu.
  */
 export function Input({ active, placeholder, onSubmit, onChange, onCtrlC, suggest }: Props) {
+  const t = useTheme();
   const [value, setValueState] = useState("");
   const [cursor, setCursor] = useState(0);
   const [selected, setSelected] = useState(0);
@@ -134,8 +136,8 @@ export function Input({ active, placeholder, onSubmit, onChange, onCtrlC, sugges
   const nameWidth = Math.max(...menu.map((m) => m.name.length + (m.args ? m.args.length + 1 : 0)), 0) + 2;
   return (
     <Box flexDirection="column">
-    <Box borderStyle="round" borderColor={active ? "gray" : "blackBright"} paddingX={1}>
-      <Text color="cyan">{"> "}</Text>
+    <Box borderStyle="round" borderColor={active ? t.border : "blackBright"} paddingX={1}>
+      <Text color={t.prompt}>{"> "}</Text>
       {value === "" && placeholder ? (
         <Text>
           <Text inverse>{placeholder[0]}</Text>
@@ -156,7 +158,7 @@ export function Input({ active, placeholder, onSubmit, onChange, onCtrlC, sugges
           {visible.map((s, k) => {
             const isSel = start + k === sel;
             return (
-              <Text key={s.name} color={isSel ? "cyan" : undefined} dimColor={!isSel}>
+              <Text key={s.name} color={isSel ? t.highlight : undefined} dimColor={!isSel}>
                 {isSel ? "❯ " : "  "}
                 {`/${s.name}${s.args ? ` ${s.args}` : ""}`.padEnd(nameWidth + 1)}
                 {s.description}

@@ -44,7 +44,8 @@ describe("slash commands", () => {
     expect(matchCommands("/c").map((c) => c.name)).toEqual(["clear", "cost"]);
     expect(matchCommands("/mod").map((c) => c.name)).toEqual(["mode", "model", "models"]);
     // Prefix matches first, then names that merely contain the text.
-    expect(matchCommands("/me").map((c) => c.name)).toEqual(["memory", "resume"]);
+    expect(matchCommands("/me").map((c) => c.name)).toEqual(["memory", "resume", "theme", "themes"]);
+    expect(matchCommands("/th").map((c) => c.name)).toEqual(["theme", "themes"]);
     expect(matchCommands("/").length).toBeGreaterThan(6);
   });
 });
