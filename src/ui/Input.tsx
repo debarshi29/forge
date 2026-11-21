@@ -1,5 +1,6 @@
 import { Box, Text, useInput } from "ink";
 import { useTheme } from "./theme.js";
+import { isMouseInput } from "./pets.js";
 import { useRef, useState } from "react";
 
 /** An entry in the completion menu (slash commands). */
@@ -65,6 +66,7 @@ export function Input({ active, placeholder, onSubmit, onChange, onCtrlC, sugges
       // The subscription is dropped in an effect after `active` flips; until
       // then, ignore keys so they can't land in a hidden input.
       if (!active) return;
+      if (isMouseInput(input)) return; // clicks are for the pet, not the prompt
       if (key.ctrl && input === "c") {
         onCtrlC?.(value);
         if (value) setValue("");

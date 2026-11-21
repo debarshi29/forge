@@ -12,6 +12,9 @@ const SettingsSchema = z
     permissionMode: z.enum(PERMISSION_MODES as [PermissionMode, ...PermissionMode[]]),
     maxTokens: z.number().int().positive(),
     theme: z.string(),
+    pet: z.string(),
+    petName: z.string(),
+    petClicks: z.boolean(),
     anthropic: z.object({ baseURL: z.string(), fallbacks: z.boolean() }).partial(),
     openai: z.object({ baseURL: z.string(), contextWindow: z.number().int().positive() }).partial(),
     gemini: z.object({ vertexai: z.boolean(), project: z.string(), location: z.string() }).partial(),
@@ -30,6 +33,9 @@ export interface Config {
   permissionMode: PermissionMode;
   maxTokens?: number;
   theme?: string;
+  pet?: string;
+  petName?: string;
+  petClicks?: boolean;
   anthropic: NonNullable<Settings["anthropic"]>;
   openai: NonNullable<Settings["openai"]>;
   gemini: NonNullable<Settings["gemini"]>;
@@ -90,6 +96,9 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
     permissionMode: merged.permissionMode ?? "default",
     maxTokens: merged.maxTokens,
     theme: merged.theme,
+    pet: merged.pet,
+    petName: merged.petName,
+    petClicks: merged.petClicks,
     anthropic: merged.anthropic ?? {},
     openai: merged.openai ?? {},
     gemini: merged.gemini ?? {},

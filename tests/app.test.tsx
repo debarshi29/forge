@@ -5,6 +5,7 @@ import { render } from "ink";
 import { afterEach, describe, expect, it } from "vitest";
 import { Agent } from "../src/agent/loop.js";
 import { Session } from "../src/agent/session.js";
+import { filterMouse } from "../src/ui/mouseStdin.js";
 import { Permissions, type PermissionMode } from "../src/permissions/index.js";
 import { FakeProvider, type FakeTurn } from "../src/providers/fake.js";
 import { defaultTools } from "../src/tools/registry.js";
@@ -41,7 +42,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until(fn: () => boolean, ms = 3000) {
   const end = Date.now() + ms;
   while (!fn()) {
-    if (Date.now() > end) throw new Error("timed out waiting for UI");
+    if (Date.now() > end) throw new Error(`timed out waiting for UI: ${fn.toString().slice(0, 120)}`);
     await sleep(20);
   }
 }
@@ -62,9 +63,10 @@ async function mount(turns: FakeTurn[], mode: PermissionMode = "default", opts: 
   });
   const stdout = new FakeStdout();
   const stdin = fakeStdin();
-  const app = render(<App agent={agent} root={root} bridge={bridge} allowBypass={false} env={opts.env} {...opts.extra} />, {
+  const filtered = filterMouse(stdin);
+  const app = render(<App agent={agent} root={root} bridge={bridge} allowBypass={false} env={opts.env} mouse={filtered.mouse} {...opts.extra} />, {
     stdout: stdout as unknown as NodeJS.WriteStream,
-    stdin: stdin as unknown as NodeJS.ReadStream,
+    stdin: filtered.stdin,
     exitOnCtrlC: false,
     patchConsole: false,
     interactive: true,
@@ -76,7 +78,12 @@ async function mount(turns: FakeTurn[], mode: PermissionMode = "default", opts: 
       await sleep(5);
     }
   };
-  return { root, agent, stdout, type };
+  /** Write one chunk at once, as a terminal sends an escape sequence. */
+  const send = async (s: string) => {
+    stdin.write(s);
+    await sleep(20);
+  };
+  return { root, agent, stdout, type, send };
 }
 
 describe("TUI", () => {
@@ -220,6 +227,51 @@ describe("TUI", () => {
     await type("/theme plaid\r");
     await until(() => stdout.text().includes('No theme "plaid"'));
     expect(saved).toEqual(["ocean"]);
+  });
+
+  it("adopts a pet from /pets and pets it with clicks and Ctrl+P", async () => {
+    const saved: unknown[] = [];
+    const { stdout, type, send } = await mount([], "default", { extra: { savePet: (p) => saved.push(p) } });
+    await type("/pets\r");
+    await until(() => stdout.text().includes("Adopt a pet") && stdout.text().includes("Octopus"));
+    await sleep(100);
+    await type("\x1b[C"); // → Dog
+    await sleep(50);
+    await type("\r");
+    await until(() => stdout.text().includes("You adopted Biscuit the dog"));
+    expect(saved.at(-1)).toMatchObject({ kind: "dog", name: "Biscuit", clicks: true });
+    // Mouse reporting is switched on for the clickable pet.
+    await until(() => stdout.frames.join("").includes("\x1b[?1000h"));
+
+    await sleep(100);
+    await send("\x1b[<0;10;5M"); // a left click
+    await until(() => stdout.text().includes("Biscuit ♥ 1"));
+    await type("\x10"); // Ctrl+P
+    await until(() => stdout.text().includes("Biscuit ♥ 2"));
+    // The click never reached the prompt.
+    expect(stdout.text()).not.toContain("> [<0");
+  });
+
+  it("throws a party after ten quick clicks, and can be renamed and hidden", async () => {
+    const saved: Array<{ kind: string; name?: string; clicks: boolean }> = [];
+    const { stdout, type, send } = await mount([], "default", {
+      extra: { initialPet: { kind: "cat", clicks: true }, savePet: (p) => saved.push(p) },
+    });
+    await until(() => stdout.text().includes("Mochi"));
+    await sleep(100);
+    for (let i = 0; i < 10; i++) await send("\x1b[<0;3;3M");
+    await until(() => stdout.text().includes("PARTY!!!"));
+    await type("/pet name Whiskers\r");
+    await until(() => stdout.text().includes("now called Whiskers"));
+    await type("/pet clicks off\r");
+    await until(() => stdout.frames.join("").includes("\x1b[?1000l"));
+    await type("/pet hide\r");
+    await until(() => stdout.text().includes("Pet hidden"));
+    expect(saved.map((s) => [s.kind, s.name, s.clicks])).toEqual([
+      ["cat", "Whiskers", true],
+      ["cat", "Whiskers", false],
+      ["none", "Whiskers", false],
+    ]);
   });
 
   it("runs slash commands", async () => {

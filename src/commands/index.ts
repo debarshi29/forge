@@ -25,6 +25,12 @@ export interface CommandContext {
   /** Apply and save a theme by name; false if there is no such theme. */
   setTheme?(name: string): boolean;
   themeName?: string;
+  /** Open the pet adoption picker. */
+  openPetPicker?(): void;
+  /** The current pet, if any. */
+  pet?: { kind: string; name: string; clicks: boolean };
+  updatePet?(patch: { kind?: string; name?: string; clicks?: boolean }): void;
+  pokePet?(): void;
 }
 
 export interface SlashCommand {
@@ -124,6 +130,52 @@ export const COMMANDS: SlashCommand[] = [
     run(_a, ctx) {
       if (ctx.openThemePicker) return ctx.openThemePicker();
       ctx.print(`Themes: ${THEMES.map((t) => t.name).join(", ")}`);
+    },
+  },
+  {
+    name: "pets",
+    description: "Adopt a desk pet that lives above the prompt",
+    run(_a, ctx) {
+      if (ctx.openPetPicker) return ctx.openPetPicker();
+      ctx.print("Pets are only available in the interactive UI.", "warn");
+    },
+  },
+  {
+    name: "pet",
+    args: "[name <n> | clicks on|off | hide]",
+    description: "Pet your pet, rename it, or toggle mouse clicks",
+    run(args, ctx) {
+      const [sub, ...rest] = args.trim().split(/\s+/);
+      if (!ctx.pet) {
+        if (ctx.openPetPicker) return ctx.openPetPicker();
+        return ctx.print("No pet yet. Try /pets.");
+      }
+      switch ((sub ?? "").toLowerCase()) {
+        case "":
+          ctx.pokePet?.();
+          return;
+        case "name": {
+          const name = rest.join(" ").trim().slice(0, 20);
+          if (!name) return ctx.print("Usage: /pet name <name>", "error");
+          ctx.updatePet?.({ name });
+          return ctx.print(`Your ${ctx.pet.kind.toLowerCase()} is now called ${name}.`);
+        }
+        case "clicks": {
+          const v = (rest[0] ?? "").toLowerCase();
+          if (v !== "on" && v !== "off") return ctx.print("Usage: /pet clicks on|off", "error");
+          ctx.updatePet?.({ clicks: v === "on" });
+          return ctx.print(
+            v === "on"
+              ? "Mouse clicks on: click your pet! (The terminal's mouse-wheel scrolling is paused while this is on.)"
+              : "Mouse clicks off: scrolling works normally. Press Ctrl+P (or /pet) to pet.",
+          );
+        }
+        case "hide":
+          ctx.updatePet?.({ kind: "none" });
+          return ctx.print("Pet hidden. /pets to adopt one again.");
+        default:
+          return ctx.print("Usage: /pet [name <name> | clicks on|off | hide]", "error");
+      }
     },
   },
   {

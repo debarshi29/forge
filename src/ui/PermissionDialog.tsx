@@ -1,5 +1,6 @@
 import { Box, Text, useInput } from "ink";
 import { useTheme } from "./theme.js";
+import { isMouseInput } from "./pets.js";
 import { useState } from "react";
 import type { AskAnswer, PermissionRequest } from "../permissions/index.js";
 import { preview } from "./format.js";
@@ -29,6 +30,7 @@ export function PermissionDialog({ request, onAnswer }: Props) {
   const [reason, setReason] = useState<string | undefined>(undefined);
 
   useInput((input, key) => {
+    if (isMouseInput(input)) return;
     if (reason !== undefined) {
       if (key.return) return onAnswer({ kind: "no", ...(reason.trim() ? { reason: reason.trim() } : {}) });
       if (key.escape) return setReason(undefined);
