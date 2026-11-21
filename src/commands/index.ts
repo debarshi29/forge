@@ -1,14 +1,20 @@
 import type { Agent } from "../agent/loop.js";
 import { PERMISSION_MODES, type PermissionMode } from "../permissions/index.js";
+import { formatCost, priceFor } from "../agent/cost.js";
+import type { MemoryFile } from "../agent/memory.js";
 import { formatTokens } from "../ui/format.js";
 
 export interface CommandContext {
   agent: Agent;
   print(text: string, tone?: "info" | "warn" | "error"): void;
   clearTranscript(): void;
+  /** Point persistence at a fresh session file (no-op when sessions are off). */
+  startNewSession(): void;
+  openResume(): void;
   setMode(mode: PermissionMode): void;
   exit(): void;
   allowBypass: boolean;
+  memory: MemoryFile[];
 }
 
 export interface SlashCommand {
@@ -34,8 +40,16 @@ export const COMMANDS: SlashCommand[] = [
     description: "Start a new conversation",
     run(_a, ctx) {
       ctx.agent.reset();
+      ctx.startNewSession();
       ctx.clearTranscript();
       ctx.print("Started a new conversation.");
+    },
+  },
+  {
+    name: "resume",
+    description: "Resume a previous conversation",
+    run(_a, ctx) {
+      ctx.openResume();
     },
   },
   {
@@ -63,15 +77,27 @@ export const COMMANDS: SlashCommand[] = [
   },
   {
     name: "cost",
-    description: "Show token usage for this session",
+    description: "Show token usage and cost for this session",
     run(_a, ctx) {
       const u = ctx.agent.usage;
+      const priced = priceFor(ctx.agent.model) !== undefined;
       ctx.print(
-        `Tokens: ${formatTokens(u.inputTokens)} in (${formatTokens(u.cacheReadTokens ?? 0)} cache read, ${formatTokens(
-          u.cacheWriteTokens ?? 0,
-        )} cache write) · ${formatTokens(u.outputTokens)} out\nContext: ${formatTokens(ctx.agent.lastInputTokens)} / ${formatTokens(
-          ctx.agent.contextWindow,
-        )}`,
+        `Cost: ${priced ? formatCost(ctx.agent.costUSD) : "unknown for this model"}\nTokens: ${formatTokens(u.inputTokens)} in (${formatTokens(
+          u.cacheReadTokens ?? 0,
+        )} cache read, ${formatTokens(u.cacheWriteTokens ?? 0)} cache write) · ${formatTokens(u.outputTokens)} out\nContext: ${formatTokens(
+          ctx.agent.lastInputTokens,
+        )} / ${formatTokens(ctx.agent.contextWindow)}`,
+      );
+    },
+  },
+  {
+    name: "memory",
+    description: "List the AGENTS.md / FORGE.md files in effect",
+    run(_a, ctx) {
+      ctx.print(
+        ctx.memory.length
+          ? `Memory files (general → specific):\n${ctx.memory.map((m) => `  ${m.path} (${m.scope}, ${m.content.length} chars)`).join("\n")}`
+          : "No memory files. Add AGENTS.md or FORGE.md to the project (or ~/.forge/) to give Forge standing instructions.",
       );
     },
   },

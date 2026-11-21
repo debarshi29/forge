@@ -1,9 +1,14 @@
-import { Box, Static, Text, useApp, useInput } from "ink";
+import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Agent } from "../agent/loop.js";
 import { matchCommands, parseCommand, type CommandContext } from "../commands/index.js";
 import type { AskAnswer, AskFn, PermissionMode, PermissionRequest } from "../permissions/index.js";
+import { formatCost } from "../agent/cost.js";
+import type { MemoryFile } from "../agent/memory.js";
+import { listSessions, resumeInto, Session, type SessionInfo } from "../agent/session.js";
 import { formatElapsed, formatTokens } from "./format.js";
+import { messagesToItems } from "./history.js";
+import { SessionPicker } from "./SessionPicker.js";
 import { Input } from "./Input.js";
 import { PermissionDialog } from "./PermissionDialog.js";
 import { ItemView, ToolCard, type Item } from "./Transcript.js";
@@ -19,6 +24,13 @@ interface Props {
   bridge: AskBridge;
   allowBypass: boolean;
   initialPrompt?: string;
+  /** Open the session picker on start (`forge --resume` without an id). */
+  pickSession?: boolean;
+  /** Transcript of a session resumed from the command line. */
+  initialItems?: ItemInput[];
+  /** Memory files in effect, for /memory. */
+  memory?: MemoryFile[];
+  env?: NodeJS.ProcessEnv;
 }
 
 type ItemInput = Item extends infer T ? (T extends Item ? Omit<T, "id"> : never) : never;
@@ -31,10 +43,15 @@ const MODE_LABEL: Record<PermissionMode, string> = {
   bypass: "bypass permissions",
 };
 
-export function App({ agent, root, bridge, allowBypass, initialPrompt }: Props) {
+export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env }: Props) {
   const { exit } = useApp();
+  const { stdout } = useStdout();
   const nextId = useRef(1);
-  const [items, setItems] = useState<Item[]>([{ id: 0, kind: "banner", model: agent.model, root }]);
+  const [items, setItems] = useState<Item[]>(() => [
+    { id: 0, kind: "banner", model: agent.model, root },
+    ...(initialItems ?? []).map((it) => ({ ...it, id: nextId.current++ }) as Item),
+  ]);
+  const [sessions, setSessions] = useState<SessionInfo[] | undefined>(() => (pickSession ? listSessions(root, env) : undefined));
   const [staticKey, setStaticKey] = useState(0);
   const [liveText, setLiveText] = useState("");
   const [liveThinking, setLiveThinking] = useState("");
@@ -144,16 +161,40 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt }: Props) 
     [agent, flush, push],
   );
 
+  const resetTranscript = (extra: ItemInput[] = []) => {
+    // Static output can't be erased; clear the screen and start a new Static.
+    stdout.write("\x1b[2J\x1b[3J\x1b[H");
+    setItems([
+      { id: nextId.current++, kind: "banner", model: agent.model, root },
+      ...extra.map((it) => ({ ...it, id: nextId.current++ }) as Item),
+    ]);
+    setStaticKey((k) => k + 1);
+  };
+
+  const resume = (info: SessionInfo) => {
+    setSessions(undefined);
+    try {
+      const loaded = resumeInto(agent, root, info, env);
+      resetTranscript([
+        ...messagesToItems(loaded.messages, agent.tools),
+        { kind: "info", text: `Resumed session ${info.id} (${loaded.messages.length} messages).` },
+      ]);
+      setUsageTick((n) => n + 1);
+    } catch (err) {
+      push({ kind: "info", text: `Could not resume: ${err instanceof Error ? err.message : String(err)}`, tone: "error" });
+    }
+  };
+
   const commandCtx: CommandContext = {
     agent,
     allowBypass,
+    memory,
     print: (text, tone) => push({ kind: "info", text, tone }),
-    clearTranscript: () => {
-      // Static output can't be erased; clear the screen and start a new Static.
-      process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
-      setItems([{ id: nextId.current++, kind: "banner", model: agent.model, root }]);
-      setStaticKey((k) => k + 1);
+    clearTranscript: () => resetTranscript(),
+    startNewSession: () => {
+      if (agent.recorder) agent.setRecorder(new Session(root, agent.model, { env }));
     },
+    openResume: () => setSessions(listSessions(root, env)),
     setMode,
     exit: () => exit(),
   };
@@ -246,6 +287,10 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt }: Props) 
         </Box>
       )}
 
+      {sessions && !busy && (
+        <SessionPicker sessions={sessions} onPick={resume} onCancel={() => setSessions(undefined)} />
+      )}
+
       {pending && (
         <PermissionDialog
           request={pending.req}
@@ -258,7 +303,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt }: Props) 
 
       <Box marginTop={1} flexDirection="column">
         <Input
-          active={!pending}
+          active={!pending && !(sessions && !busy)}
           placeholder={busy ? "Working… (type /help, or Esc to interrupt)" : "Ask Forge to do something"}
           onSubmit={submit}
           onChange={setInputValue}
@@ -276,7 +321,8 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt }: Props) 
             {MODE_LABEL[mode]} <Text dimColor>(shift+tab)</Text>
           </Text>
           <Text dimColor>
-            {agent.model} · ctx {ctxPct}% · {formatTokens(agent.usage.inputTokens)}↑ {formatTokens(agent.usage.outputTokens)}↓
+            {agent.model} · ctx {ctxPct}% · {formatTokens(agent.usage.inputTokens)}↑ {formatTokens(agent.usage.outputTokens)}↓ ·{" "}
+            {formatCost(agent.costUSD)}
           </Text>
         </Box>
       </Box>

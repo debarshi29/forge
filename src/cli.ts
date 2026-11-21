@@ -5,7 +5,11 @@ import { Command, Option } from "commander";
 import { render } from "ink";
 import { createElement } from "react";
 import { Agent, type AgentEvent } from "./agent/loop.js";
+import { formatCost } from "./agent/cost.js";
+import { loadMemory } from "./agent/memory.js";
+import { findSession, listSessions, resumeInto, Session } from "./agent/session.js";
 import { buildSystemPrompt } from "./agent/systemPrompt.js";
+import { messagesToItems } from "./ui/history.js";
 import { loadConfig } from "./config/index.js";
 import { PERMISSION_MODES, Permissions, type AskFn, type PermissionMode } from "./permissions/index.js";
 import { resolveModel } from "./providers/registry.js";
@@ -19,6 +23,9 @@ interface Flags {
   permissionMode?: PermissionMode;
   output: "text" | "json";
   cwd?: string;
+  continue?: boolean;
+  resume?: string | boolean;
+  session?: boolean;
 }
 
 const program = new Command()
@@ -31,6 +38,9 @@ const program = new Command()
   .addOption(new Option("--permission-mode <mode>", "permission mode").choices(PERMISSION_MODES))
   .addOption(new Option("--output <format>", "headless output format").choices(["text", "json"]).default("text"))
   .option("--cwd <dir>", "project directory (default: current directory)")
+  .option("-c, --continue", "continue the most recent session in this project")
+  .option("-r, --resume [id]", "resume a session by id (or pick one interactively)")
+  .option("--no-session", "don't save this conversation")
   .action(async (words: string[], flags: Flags) => {
     const root = path.resolve(flags.cwd ?? process.cwd());
     const config = loadConfig(root, { model: flags.model, effort: flags.effort, permissionMode: flags.permissionMode });
@@ -56,15 +66,44 @@ const program = new Command()
       ask = (req) => (bridge.ask ? bridge.ask(req) : Promise.resolve({ kind: "no", reason: "UI not ready" }));
     }
 
+    const memory = loadMemory(root);
+    const tools = defaultTools();
     const agent = new Agent({
       provider,
       model,
-      system: buildSystemPrompt({ root, cwd: root, model: config.model }),
-      tools: defaultTools(),
+      system: buildSystemPrompt({ root, cwd: root, model: config.model, memory }),
+      tools,
       permissions: new Permissions(config.permissionMode, ask),
       root,
       maxTokens: config.maxTokens,
     });
+
+    // Sessions: --continue (latest), --resume <id>, or --resume alone (picker).
+    let initialItems: ReturnType<typeof messagesToItems> | undefined;
+    let pickSession = false;
+    if (flags.session !== false) {
+      const target =
+        flags.continue === true
+          ? listSessions(root)[0]
+          : typeof flags.resume === "string"
+            ? findSession(root, flags.resume)
+            : undefined;
+      if ((flags.continue || typeof flags.resume === "string") && !target) {
+        throw new Error(flags.continue ? "No previous session for this project." : `No session matches "${flags.resume}".`);
+      }
+      if (target) {
+        const loaded = resumeInto(agent, root, target);
+        initialItems = [
+          ...messagesToItems(loaded.messages, tools),
+          { kind: "info", text: `Resumed session ${target.id} (${loaded.messages.length} messages).` },
+        ];
+        if (headless && flags.output === "text") process.stderr.write(`\x1b[2m[resumed ${target.id}]\x1b[0m\n`);
+      } else {
+        agent.setRecorder(new Session(root, config.model));
+        pickSession = flags.resume === true;
+        if (pickSession && headless) throw new Error("--resume needs a session id in -p mode (or use --continue)");
+      }
+    }
 
     if (flags.print !== undefined) {
       const ok = await runPrompt(agent, flags.print, flags.output);
@@ -84,6 +123,9 @@ const program = new Command()
         bridge,
         allowBypass: config.permissionMode === "bypass",
         initialPrompt: words.length ? words.join(" ") : undefined,
+        initialItems,
+        pickSession,
+        memory,
       }),
       { exitOnCtrlC: false },
     );
@@ -111,7 +153,7 @@ async function runPrompt(agent: Agent, prompt: string, output: "text" | "json"):
   }
   if (output === "text") {
     const u = agent.usage;
-    process.stderr.write(`\x1b[2m[${u.inputTokens} in / ${u.outputTokens} out tokens]\x1b[0m\n`);
+    process.stderr.write(`\x1b[2m[${u.inputTokens} in / ${u.outputTokens} out tokens · ${formatCost(agent.costUSD)}]\x1b[0m\n`);
   }
   return ok;
 }

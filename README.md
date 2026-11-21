@@ -29,6 +29,24 @@ Settings are merged from `~/.forge/settings.json`, then `<project>/.forge/settin
 { "model": "anthropic:claude-opus-5-5", "effort": "high", "permissionMode": "default" }
 ```
 
+### Sessions
+
+Every conversation is saved as append-only JSONL under `~/.forge/sessions/<project>-<hash>/`.
+
+```sh
+forge --continue          # pick up the most recent session in this project
+forge --resume            # choose from a list (or /resume inside the TUI)
+forge --resume <id>       # by id or unique id prefix
+forge --no-session        # don't save this one
+```
+
+`/cost` shows tokens and estimated cost (Anthropic list prices, including cache reads and writes).
+
+### Memory files
+
+Standing instructions are read from `AGENTS.md` and `FORGE.md`: first `~/.forge/`, then every directory from the repo root
+down to the working directory (more specific files come later and win). `/memory` lists what is loaded.
+
 ## Development
 
 ```sh

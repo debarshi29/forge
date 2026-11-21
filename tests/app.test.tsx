@@ -4,6 +4,7 @@ import { PassThrough, Writable } from "node:stream";
 import { render } from "ink";
 import { afterEach, describe, expect, it } from "vitest";
 import { Agent } from "../src/agent/loop.js";
+import { Session } from "../src/agent/session.js";
 import { Permissions, type PermissionMode } from "../src/permissions/index.js";
 import { FakeProvider, type FakeTurn } from "../src/providers/fake.js";
 import { defaultTools } from "../src/tools/registry.js";
@@ -46,8 +47,8 @@ async function until(fn: () => boolean, ms = 3000) {
 let cleanup: (() => void) | undefined;
 afterEach(() => cleanup?.());
 
-async function mount(turns: FakeTurn[], mode: PermissionMode = "default") {
-  const root = await tempDir();
+async function mount(turns: FakeTurn[], mode: PermissionMode = "default", opts: { root?: string; env?: NodeJS.ProcessEnv } = {}) {
+  const root = opts.root ?? (await tempDir());
   const bridge: AskBridge = {};
   const agent = new Agent({
     provider: new FakeProvider(turns),
@@ -59,7 +60,7 @@ async function mount(turns: FakeTurn[], mode: PermissionMode = "default") {
   });
   const stdout = new FakeStdout();
   const stdin = fakeStdin();
-  const app = render(<App agent={agent} root={root} bridge={bridge} allowBypass={false} />, {
+  const app = render(<App agent={agent} root={root} bridge={bridge} allowBypass={false} env={opts.env} />, {
     stdout: stdout as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
     exitOnCtrlC: false,
@@ -105,6 +106,24 @@ describe("TUI", () => {
     await type("\x1b[Z");
     await until(() => agent.permissions.mode === "plan");
     expect(stdout.text()).toContain("plan mode");
+  });
+
+  it("resumes a saved session from the /resume picker", async () => {
+    const home = await tempDir();
+    const root = await tempDir();
+    const env = { FORGE_HOME: home };
+    const saved = new Session(root, "fake", { env });
+    saved.message({ role: "user", content: [{ type: "text", text: "fix the flaky test" }] });
+    saved.message({ role: "assistant", content: [{ type: "text", text: "Fixed it earlier." }] });
+
+    const { agent, stdout, type } = await mount([], "default", { root, env });
+    await type("/resume\r");
+    await until(() => stdout.text().includes("Resume a conversation"));
+    await sleep(100);
+    await type("\r");
+    await until(() => stdout.text().includes("Resumed session"));
+    expect(stdout.text()).toContain("Fixed it earlier.");
+    expect(agent.messages).toHaveLength(2);
   });
 
   it("runs slash commands", async () => {
