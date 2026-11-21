@@ -12,8 +12,14 @@ const SettingsSchema = z
     permissionMode: z.enum(PERMISSION_MODES as [PermissionMode, ...PermissionMode[]]),
     maxTokens: z.number().int().positive(),
     anthropic: z.object({ baseURL: z.string(), fallbacks: z.boolean() }).partial(),
+    openai: z.object({ baseURL: z.string(), contextWindow: z.number().int().positive() }).partial(),
+    gemini: z.object({ vertexai: z.boolean(), project: z.string(), location: z.string() }).partial(),
+    ollama: z.object({ baseURL: z.string(), contextWindow: z.number().int().positive() }).partial(),
+    lmstudio: z.object({ baseURL: z.string(), contextWindow: z.number().int().positive() }).partial(),
   })
   .partial();
+
+const PROVIDER_KEYS = ["anthropic", "openai", "gemini", "ollama", "lmstudio"] as const;
 
 export type Settings = z.infer<typeof SettingsSchema>;
 
@@ -23,6 +29,10 @@ export interface Config {
   permissionMode: PermissionMode;
   maxTokens?: number;
   anthropic: NonNullable<Settings["anthropic"]>;
+  openai: NonNullable<Settings["openai"]>;
+  gemini: NonNullable<Settings["gemini"]>;
+  ollama: NonNullable<Settings["ollama"]>;
+  lmstudio: NonNullable<Settings["lmstudio"]>;
   /** Files that were loaded, lowest precedence first. */
   sources: string[];
 }
@@ -63,7 +73,10 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
     const s = loadFile(f);
     if (s) {
       sources.push(f);
-      merged = { ...merged, ...s, anthropic: { ...merged.anthropic, ...s.anthropic } };
+      const next: Settings = { ...merged, ...s };
+      // Provider sections merge key by key rather than replacing each other.
+      for (const k of PROVIDER_KEYS) next[k] = { ...merged[k], ...s[k] } as never;
+      merged = next;
     }
   }
   const fromEnv: Settings = env.FORGE_MODEL ? { model: env.FORGE_MODEL } : {};
@@ -75,6 +88,10 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
     permissionMode: merged.permissionMode ?? "default",
     maxTokens: merged.maxTokens,
     anthropic: merged.anthropic ?? {},
+    openai: merged.openai ?? {},
+    gemini: merged.gemini ?? {},
+    ollama: merged.ollama ?? {},
+    lmstudio: merged.lmstudio ?? {},
     sources,
   };
 }

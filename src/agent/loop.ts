@@ -55,14 +55,30 @@ export class Agent {
   costUSD = 0;
   private readonly toolCtx: Omit<ToolContext, "signal">;
 
-  constructor(private readonly opts: AgentOptions) {
+  constructor(private opts: AgentOptions) {
     this.messages = opts.messages ?? [];
     const cwd = opts.cwd ?? opts.root;
     this.toolCtx = { root: opts.root, cwd, fileState: new Map(), shell: { cwd } };
   }
 
+  /** Model id as the provider knows it. */
   get model(): string {
     return this.opts.model;
+  }
+
+  /** "provider:model", used for display, pricing and session records. */
+  get modelSpec(): string {
+    return `${this.opts.provider.name}:${this.opts.model}`;
+  }
+
+  /**
+   * Switch provider/model mid-session. History is kept as-is: each adapter
+   * replays its own native turns and skips other providers' reasoning.
+   */
+  setModel(provider: Provider, model: string, system?: string): void {
+    this.opts.provider = provider;
+    this.opts.model = model;
+    if (system !== undefined) this.opts.system = system;
   }
 
   get contextWindow(): number {
@@ -251,8 +267,8 @@ export class Agent {
   }
 
   private addUsage(u: Usage): void {
-    this.costUSD += costOf(this.opts.model, u) ?? 0;
-    this.opts.recorder?.usage(this.opts.model, u);
+    this.costUSD += costOf(this.modelSpec, u) ?? 0;
+    this.opts.recorder?.usage(this.modelSpec, u);
     this.usage.inputTokens += u.inputTokens;
     this.usage.outputTokens += u.outputTokens;
     this.usage.cacheReadTokens = (this.usage.cacheReadTokens ?? 0) + (u.cacheReadTokens ?? 0);

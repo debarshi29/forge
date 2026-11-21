@@ -31,6 +31,8 @@ interface Props {
   /** Memory files in effect, for /memory. */
   memory?: MemoryFile[];
   env?: NodeJS.ProcessEnv;
+  /** Switch provider/model (wired by the CLI, which knows the settings). */
+  switchModel?(spec: string): void;
 }
 
 type ItemInput = Item extends infer T ? (T extends Item ? Omit<T, "id"> : never) : never;
@@ -43,12 +45,12 @@ const MODE_LABEL: Record<PermissionMode, string> = {
   bypass: "bypass permissions",
 };
 
-export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env }: Props) {
+export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel }: Props) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const nextId = useRef(1);
   const [items, setItems] = useState<Item[]>(() => [
-    { id: 0, kind: "banner", model: agent.model, root },
+    { id: 0, kind: "banner", model: agent.modelSpec, root },
     ...(initialItems ?? []).map((it) => ({ ...it, id: nextId.current++ }) as Item),
   ]);
   const [sessions, setSessions] = useState<SessionInfo[] | undefined>(() => (pickSession ? listSessions(root, env) : undefined));
@@ -165,7 +167,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     // Static output can't be erased; clear the screen and start a new Static.
     stdout.write("\x1b[2J\x1b[3J\x1b[H");
     setItems([
-      { id: nextId.current++, kind: "banner", model: agent.model, root },
+      { id: nextId.current++, kind: "banner", model: agent.modelSpec, root },
       ...extra.map((it) => ({ ...it, id: nextId.current++ }) as Item),
     ]);
     setStaticKey((k) => k + 1);
@@ -189,10 +191,16 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     agent,
     allowBypass,
     memory,
+    switchModel: switchModel
+      ? (spec: string) => {
+          switchModel(spec);
+          setUsageTick((n) => n + 1);
+        }
+      : undefined,
     print: (text, tone) => push({ kind: "info", text, tone }),
     clearTranscript: () => resetTranscript(),
     startNewSession: () => {
-      if (agent.recorder) agent.setRecorder(new Session(root, agent.model, { env }));
+      if (agent.recorder) agent.setRecorder(new Session(root, agent.modelSpec, { env }));
     },
     openResume: () => setSessions(listSessions(root, env)),
     setMode,
@@ -321,7 +329,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
             {MODE_LABEL[mode]} <Text dimColor>(shift+tab)</Text>
           </Text>
           <Text dimColor>
-            {agent.model} · ctx {ctxPct}% · {formatTokens(agent.usage.inputTokens)}↑ {formatTokens(agent.usage.outputTokens)}↓ ·{" "}
+            {agent.modelSpec} · ctx {ctxPct}% · {formatTokens(agent.usage.inputTokens)}↑ {formatTokens(agent.usage.outputTokens)}↓ ·{" "}
             {formatCost(agent.costUSD)}
           </Text>
         </Box>

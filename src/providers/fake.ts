@@ -18,11 +18,13 @@ export interface FakeTurn {
  * every request it receives in `requests`.
  */
 export class FakeProvider implements Provider {
-  readonly name = "fake";
   readonly requests: StreamRequest[] = [];
   private turn = 0;
 
-  constructor(private readonly turns: FakeTurn[]) {}
+  constructor(
+    private readonly turns: FakeTurn[],
+    readonly name = "fake",
+  ) {}
 
   capabilities(): ProviderCapabilities {
     return { thinking: false, caching: false, parallelTools: true, contextWindow: 100_000 };

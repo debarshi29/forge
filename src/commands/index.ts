@@ -15,6 +15,8 @@ export interface CommandContext {
   exit(): void;
   allowBypass: boolean;
   memory: MemoryFile[];
+  /** Resolve a "provider:model" spec and switch the agent to it; throws on bad specs. */
+  switchModel?(spec: string): void;
 }
 
 export interface SlashCommand {
@@ -70,9 +72,22 @@ export const COMMANDS: SlashCommand[] = [
   },
   {
     name: "model",
-    description: "Show the current model",
-    run(_a, ctx) {
-      ctx.print(`Model: ${ctx.agent.model} (switching arrives with multi-provider support)`);
+    args: "[provider:model]",
+    description: "Show or switch the model",
+    run(args, ctx) {
+      const spec = args.trim();
+      if (!spec) {
+        return ctx.print(
+          `Model: ${ctx.agent.modelSpec}\nSwitch with /model <provider:model>, e.g.\n  /model anthropic:claude-opus-5-5\n  /model anthropic:claude-sonnet-5-5\n  /model gemini:gemini-2.5-pro\n  /model openai:gpt-5\n  /model ollama:qwen3-coder`,
+        );
+      }
+      if (!ctx.switchModel) return ctx.print("Model switching is not available here.", "warn");
+      try {
+        ctx.switchModel(spec);
+        ctx.print(`Switched to ${ctx.agent.modelSpec}. The conversation continues on the new model.`);
+      } catch (err) {
+        ctx.print(err instanceof Error ? err.message : String(err), "error");
+      }
     },
   },
   {
@@ -80,7 +95,7 @@ export const COMMANDS: SlashCommand[] = [
     description: "Show token usage and cost for this session",
     run(_a, ctx) {
       const u = ctx.agent.usage;
-      const priced = priceFor(ctx.agent.model) !== undefined;
+      const priced = priceFor(ctx.agent.modelSpec) !== undefined;
       ctx.print(
         `Cost: ${priced ? formatCost(ctx.agent.costUSD) : "unknown for this model"}\nTokens: ${formatTokens(u.inputTokens)} in (${formatTokens(
           u.cacheReadTokens ?? 0,
