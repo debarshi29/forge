@@ -9,6 +9,8 @@ import { Permissions, type PermissionMode } from "../src/permissions/index.js";
 import { FakeProvider, type FakeTurn } from "../src/providers/fake.js";
 import { defaultTools } from "../src/tools/registry.js";
 import { App, type AskBridge } from "../src/ui/App.js";
+import type { ComponentProps } from "react";
+type AppProps = ComponentProps<typeof App>;
 import { tempDir } from "./helpers.js";
 
 class FakeStdout extends Writable {
@@ -47,7 +49,7 @@ async function until(fn: () => boolean, ms = 3000) {
 let cleanup: (() => void) | undefined;
 afterEach(() => cleanup?.());
 
-async function mount(turns: FakeTurn[], mode: PermissionMode = "default", opts: { root?: string; env?: NodeJS.ProcessEnv } = {}) {
+async function mount(turns: FakeTurn[], mode: PermissionMode = "default", opts: { root?: string; env?: NodeJS.ProcessEnv; extra?: Partial<AppProps> } = {}) {
   const root = opts.root ?? (await tempDir());
   const bridge: AskBridge = {};
   const agent = new Agent({
@@ -60,7 +62,7 @@ async function mount(turns: FakeTurn[], mode: PermissionMode = "default", opts: 
   });
   const stdout = new FakeStdout();
   const stdin = fakeStdin();
-  const app = render(<App agent={agent} root={root} bridge={bridge} allowBypass={false} env={opts.env} />, {
+  const app = render(<App agent={agent} root={root} bridge={bridge} allowBypass={false} env={opts.env} {...opts.extra} />, {
     stdout: stdout as unknown as NodeJS.WriteStream,
     stdin: stdin as unknown as NodeJS.ReadStream,
     exitOnCtrlC: false,
@@ -124,6 +126,31 @@ describe("TUI", () => {
     await until(() => stdout.text().includes("Resumed session"));
     expect(stdout.text()).toContain("Fixed it earlier.");
     expect(agent.messages).toHaveLength(2);
+  });
+
+  it("picks a model from the /model list", async () => {
+    const switched: string[] = [];
+    const { stdout, type } = await mount([], "default", {
+      extra: {
+        listModels: async () => [
+          { spec: "fake:fake", provider: "ollama", label: "fake", available: true },
+          { spec: "ollama:qwen2.5-coder:3b", provider: "ollama", label: "qwen2.5-coder:3b", available: true, note: "3.1B · 32k ctx" },
+          { spec: "gemini:gemini-2.5-pro", provider: "gemini", label: "Gemini 2.5 Pro", available: false, note: "needs GEMINI_API_KEY" },
+        ],
+        switchModel: async (spec: string) => {
+          switched.push(spec);
+        },
+      },
+    });
+    await type("/model\r");
+    await until(() => stdout.text().includes("Select a model") && stdout.text().includes("needs GEMINI_API_KEY"));
+    expect(stdout.text()).toContain("✓ current");
+    await sleep(100);
+    await type("\x1b[B"); // down: from the current model to qwen
+    await type("\r");
+    await until(() => switched.length === 1);
+    expect(switched).toEqual(["ollama:qwen2.5-coder:3b"]);
+    await until(() => stdout.text().includes("Switched to"));
   });
 
   it("runs slash commands", async () => {

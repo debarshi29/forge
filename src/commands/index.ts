@@ -15,8 +15,10 @@ export interface CommandContext {
   exit(): void;
   allowBypass: boolean;
   memory: MemoryFile[];
-  /** Resolve a "provider:model" spec and switch the agent to it; throws on bad specs. */
-  switchModel?(spec: string): void;
+  /** Resolve a "provider:model" spec and switch the agent to it; rejects on bad specs. */
+  switchModel?(spec: string): Promise<void>;
+  /** Open the interactive model list. */
+  openModelPicker?(): void;
 }
 
 export interface SlashCommand {
@@ -73,21 +75,22 @@ export const COMMANDS: SlashCommand[] = [
   {
     name: "model",
     args: "[provider:model]",
-    description: "Show or switch the model",
-    run(args, ctx) {
+    description: "Pick a model from a list, or switch to one directly",
+    async run(args, ctx) {
       const spec = args.trim();
       if (!spec) {
-        return ctx.print(
-          `Model: ${ctx.agent.modelSpec}\nSwitch with /model <provider:model>, e.g.\n  /model anthropic:claude-opus-5-5\n  /model anthropic:claude-sonnet-5-5\n  /model gemini:gemini-2.5-pro\n  /model openai:gpt-5\n  /model ollama:qwen3-coder`,
-        );
+        if (ctx.openModelPicker) return ctx.openModelPicker();
+        return ctx.print(`Model: ${ctx.agent.modelSpec}\nSwitch with /model <provider:model>, e.g. /model anthropic:claude-opus-5-5`);
       }
-      if (!ctx.switchModel) return ctx.print("Model switching is not available here.", "warn");
-      try {
-        ctx.switchModel(spec);
-        ctx.print(`Switched to ${ctx.agent.modelSpec}. The conversation continues on the new model.`);
-      } catch (err) {
-        ctx.print(err instanceof Error ? err.message : String(err), "error");
-      }
+      await switchTo(spec, ctx);
+    },
+  },
+  {
+    name: "models",
+    description: "Pick a model from a list",
+    run(_a, ctx) {
+      if (ctx.openModelPicker) return ctx.openModelPicker();
+      ctx.print(`Model: ${ctx.agent.modelSpec}`);
     },
   },
   {
@@ -124,6 +127,17 @@ export const COMMANDS: SlashCommand[] = [
     },
   },
 ];
+
+/** Switch models and report the result (shared by /model and the picker). */
+export async function switchTo(spec: string, ctx: Pick<CommandContext, "agent" | "print" | "switchModel">): Promise<void> {
+  if (!ctx.switchModel) return ctx.print("Model switching is not available here.", "warn");
+  try {
+    await ctx.switchModel(spec);
+    ctx.print(`Switched to ${ctx.agent.modelSpec}. The conversation continues on the new model.`);
+  } catch (err) {
+    ctx.print(err instanceof Error ? err.message : String(err), "error");
+  }
+}
 
 export function matchCommands(prefix: string): SlashCommand[] {
   const p = prefix.replace(/^\//, "").split(/\s/)[0]!.toLowerCase();

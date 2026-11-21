@@ -13,7 +13,8 @@ import { buildSystemPrompt } from "./agent/systemPrompt.js";
 import { messagesToItems } from "./ui/history.js";
 import { loadConfig } from "./config/index.js";
 import { PERMISSION_MODES, Permissions, type AskFn, type PermissionMode } from "./permissions/index.js";
-import { resolveModel, type ProviderSettings } from "./providers/registry.js";
+import { listModelOptions, resolveModelForUse } from "./providers/catalog.js";
+import type { ProviderSettings } from "./providers/registry.js";
 import { defaultTools } from "./tools/registry.js";
 import { App, type AskBridge } from "./ui/App.js";
 
@@ -35,7 +36,7 @@ const program = new Command()
   .description("A provider-agnostic terminal coding agent")
   .argument("[prompt...]", "prompt for interactive mode")
   .option("-p, --print <prompt>", "run one prompt headlessly and print the result")
-  .option("-m, --model <model>", 'model, e.g. "anthropic:claude-opus-5-5"')
+  .option("-m, --model <model>", 'provider:model, e.g. "anthropic:claude-opus-5-5" (default: an installed Ollama model)')
   .addOption(new Option("--effort <level>", "reasoning effort").choices(["low", "medium", "high", "xhigh", "max"]))
   .addOption(new Option("--permission-mode <mode>", "permission mode").choices(PERMISSION_MODES))
   .addOption(new Option("--output <format>", "headless output format").choices(["text", "json"]).default("text"))
@@ -56,7 +57,7 @@ const program = new Command()
       ollama: config.ollama,
       lmstudio: config.lmstudio,
     };
-    const resolved = resolveModel(config.model, providerSettings);
+    const resolved = await resolveModelForUse(config.model, providerSettings);
     const { provider, model } = resolved;
 
     const headless = flags.print !== undefined;
@@ -136,10 +137,11 @@ const program = new Command()
         initialItems,
         pickSession,
         memory,
-        switchModel: (spec: string) => {
-          const next = resolveModel(spec, providerSettings);
+        switchModel: async (spec: string) => {
+          const next = await resolveModelForUse(spec, providerSettings);
           agent.setModel(next.provider, next.model, buildSystemPrompt({ root, cwd: root, model: next.spec, memory }));
         },
+        listModels: () => listModelOptions(providerSettings),
       }),
       { exitOnCtrlC: false },
     );
