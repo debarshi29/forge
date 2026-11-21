@@ -65,7 +65,10 @@ setx OLLAMA_CONTEXT_LENGTH 16384            # Windows
 export OLLAMA_CONTEXT_LENGTH=16384          # macOS / Linux (e.g. in your shell profile)
 ```
 
-`"ollama": {"contextWindow": …}` only changes what Forge assumes, not what Ollama runs. Small local models that write
+Or set it per model from inside Forge: `/context 32k` runs the current Ollama model with a 32k context, saves that for
+the model, and tells you whether it still fits on the GPU (`/context default` goes back). Forge does this with a
+variant model such as `qwen2.5-coder:3b-ctx32k` that shares the original's weights, so it costs no disk space; variants
+are hidden from `/model`. `"ollama": {"contextWindow": …}` only changes what Forge assumes, not what Ollama runs. Small local models that write
 tool calls as JSON text instead of using native tool calls are handled too.
 
 ### Context and tasks

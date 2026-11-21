@@ -335,6 +335,25 @@ describe("TUI", () => {
     expect(agent.messages[0]!.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("say hi") });
   });
 
+  it("sets the context size with /context <size>", async () => {
+    const calls: Array<number | undefined> = [];
+    const { stdout, type } = await mount([], "default", {
+      extra: {
+        setContextLength: async (tokens) => {
+          calls.push(tokens);
+          return { text: tokens ? `now runs with a ${tokens / 1024}k context. It fits entirely on the GPU.` : "back to the default" };
+        },
+      },
+    });
+    await type("/context 32k\r");
+    await until(() => stdout.text().includes("now runs with a 32k context"));
+    await type("/context default\r");
+    await until(() => stdout.text().includes("back to the default"));
+    await type("/context huge\r");
+    await until(() => stdout.text().includes("Usage: /context"));
+    expect(calls).toEqual([32768, undefined]);
+  });
+
   it("lists rules with /permissions", async () => {
     const { stdout, type } = await mount([]);
     await type("/permissions\r");

@@ -37,6 +37,8 @@ export interface CommandContext {
   compact?(focus?: string): Promise<void>;
   /** A turn is running. */
   busy?: boolean;
+  /** Run the current (Ollama) model with this context length; undefined = server default. Returns a report. */
+  setContextLength?(tokens: number | undefined): Promise<{ text: string; tone?: "info" | "warn" }>;
 }
 
 export interface SlashCommand {
@@ -196,9 +198,25 @@ export const COMMANDS: SlashCommand[] = [
   },
   {
     name: "context",
-    description: "Show what is using the context window",
-    run(_a, ctx) {
-      ctx.print(formatContext(contextBreakdown(ctx.agent, ctx.memory)));
+    args: "[size | default]",
+    description: "Show what fills the context window, or set its size (e.g. /context 32k)",
+    async run(args, ctx) {
+      const a = args.trim().toLowerCase();
+      if (!a) return ctx.print(formatContext(contextBreakdown(ctx.agent, ctx.memory)));
+      if (ctx.busy) return ctx.print("Wait for the current turn to finish, then change the context size.", "warn");
+      if (!ctx.setContextLength) return ctx.print("Changing the context size isn't available here.", "warn");
+      let tokens: number | undefined;
+      if (!["default", "reset", "auto"].includes(a)) {
+        tokens = parseContextSize(a);
+        if (tokens === undefined) return ctx.print('Usage: /context [size | default], e.g. /context 32k or /context 24576', "error");
+      }
+      ctx.print(tokens ? `Setting the context to ${Math.round(tokens / 1024)}k and loading the model…` : "Going back to Ollama's default context and loading the model…");
+      try {
+        const r = await ctx.setContextLength(tokens);
+        ctx.print(r.text, r.tone);
+      } catch (err) {
+        ctx.print(err instanceof Error ? err.message : String(err), "error");
+      }
     },
   },
   {
@@ -274,6 +292,14 @@ export async function switchTo(spec: string, ctx: Pick<CommandContext, "agent" |
   } catch (err) {
     ctx.print(err instanceof Error ? err.message : String(err), "error");
   }
+}
+
+/** "32k" → 32768, "24576" → 24576; undefined if it isn't a size. */
+export function parseContextSize(s: string): number | undefined {
+  const m = /^(\d+(?:\.\d+)?)\s*(k)?$/i.exec(s.trim());
+  if (!m) return undefined;
+  const n = Math.round(Number(m[1]) * (m[2] ? 1024 : 1));
+  return n > 0 ? n : undefined;
 }
 
 /** Commands for the slash menu: name-prefix matches first, then names containing the text. */

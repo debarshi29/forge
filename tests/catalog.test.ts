@@ -1,18 +1,39 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { listModelOptions, pickDefaultOllamaModel, resolveModelForUse } from "../src/providers/catalog.js";
+import { listModelOptions, loadOllamaModel, pickDefaultOllamaModel, resolveModelForUse } from "../src/providers/catalog.js";
+import { parseContextSize } from "../src/commands/index.js";
 
 let server: http.Server;
 let baseURL: string;
 let tags: unknown = { models: [] };
 let ps: unknown = { models: [] };
+/** Models created through /api/create: name → num_ctx. */
+const created = new Map<string, number>();
+const createCalls: unknown[] = [];
 
 beforeAll(async () => {
-  server = http.createServer((req, res) => {
+  server = http.createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    const body = raw ? (JSON.parse(raw) as { model: string; parameters?: { num_ctx: number } }) : undefined;
+    res.setHeader("content-type", "application/json");
     if (req.url === "/api/tags" || req.url === "/api/ps") {
-      res.setHeader("content-type", "application/json");
       res.end(JSON.stringify(req.url === "/api/ps" ? ps : tags));
+    } else if (req.url === "/api/show") {
+      const n = created.get(body!.model);
+      if (n === undefined && !JSON.stringify(tags).includes(`"${body!.model}"`)) {
+        res.statusCode = 404;
+        return res.end("{}");
+      }
+      res.end(JSON.stringify({ parameters: n ? `stop "<|im_end|>"\nnum_ctx                        ${n}` : 'stop "<|im_end|>"' }));
+    } else if (req.url === "/api/create") {
+      createCalls.push(body);
+      created.set(body!.model, body!.parameters!.num_ctx);
+      res.end('{"status":"success"}');
+    } else if (req.url === "/api/generate") {
+      ps = { models: [{ name: body!.model, size: 1000, size_vram: body!.model.includes("ctx32k") ? 800 : 1000, context_length: created.get(body!.model) ?? 4096 }] };
+      res.end('{"done":true}');
     } else {
       res.statusCode = 404;
       res.end();
@@ -79,6 +100,49 @@ describe("default Ollama model", () => {
   });
 });
 
+describe("per-model context length", () => {
+  it("runs the model through a variant with the chosen context, created once", async () => {
+    tags = installed;
+    ps = { models: [] };
+    created.clear();
+    createCalls.length = 0;
+    const settings = { ollama: { baseURL, contextLengths: { "qwen2.5-coder:3b": 24576 } } };
+    const r = await resolveModelForUse("ollama:qwen2.5-coder:3b", settings, {});
+    expect(r.model).toBe("qwen2.5-coder:3b-ctx24k");
+    expect(r.provider.capabilities(r.model).contextWindow).toBe(24576);
+    expect(r.warning).toBeUndefined();
+    expect(createCalls).toEqual([{ model: "qwen2.5-coder:3b-ctx24k", from: "qwen2.5-coder:3b", parameters: { num_ctx: 24576 }, stream: false }]);
+
+    // Picking the variant (or auto-pick) maps back to the same base and doesn't recreate it.
+    const again = await resolveModelForUse("ollama:qwen2.5-coder:3b-ctx24k", settings, {});
+    expect(again.model).toBe("qwen2.5-coder:3b-ctx24k");
+    expect(createCalls).toHaveLength(1);
+  });
+
+  it("keeps variants out of the default pick and the picker", async () => {
+    tags = { models: [...installed.models, { name: "qwen2.5-coder:3b-ctx24k", details: { parameter_size: "3.1B", context_length: 32768 }, capabilities: ["completion", "tools"] }] };
+    const options = await listModelOptions({ ollama: { baseURL, contextLengths: { "qwen2.5-coder:3b": 24576 } } }, {});
+    const local = options.filter((o) => o.provider === "ollama");
+    expect(local.map((o) => o.label)).toEqual(["llama3.2:1b", "qwen2.5-coder:3b", "codegemma:2b"]);
+    expect(local[1]!.note).toContain("24k ctx (set)");
+    expect(pickDefaultOllamaModel([{ name: "qwen2.5-coder:3b-ctx24k", tools: true }, { name: "llama3.2:1b", tools: true }])?.name).toBe("llama3.2:1b");
+    tags = installed;
+  });
+
+  it("loads a model and reports how much of it is on the GPU", async () => {
+    created.set("qwen2.5-coder:3b-ctx32k", 32768);
+    expect(await loadOllamaModel(baseURL, "qwen2.5-coder:3b-ctx32k")).toEqual({ context: 32768, gpuPercent: 80 });
+  });
+
+  it("parses sizes", () => {
+    expect(parseContextSize("32k")).toBe(32768);
+    expect(parseContextSize("16K")).toBe(16384);
+    expect(parseContextSize("24576")).toBe(24576);
+    expect(parseContextSize("1.5k")).toBe(1536);
+    expect(parseContextSize("big")).toBeUndefined();
+  });
+});
+
 describe("model picker options", () => {
   it("lists installed local models, then cloud models marked by key availability", async () => {
     tags = installed;
@@ -88,7 +152,7 @@ describe("model picker options", () => {
       ["ollama:qwen2.5-coder:3b", true],
       ["ollama:codegemma:2b", true],
     ]);
-    expect(opts.find((o) => o.spec === "ollama:qwen2.5-coder:3b")?.note).toBe("3.1B · 32k ctx");
+    expect(opts.find((o) => o.spec === "ollama:qwen2.5-coder:3b")?.note).toBe("3.1B · up to 32k ctx");
     expect(opts.find((o) => o.spec === "ollama:codegemma:2b")?.note).toContain("no tool support");
     expect(opts.find((o) => o.spec === "anthropic:claude-opus-5-5")).toMatchObject({ available: true });
     expect(opts.find((o) => o.spec === "gemini:gemini-2.5-pro")).toMatchObject({ available: false, note: "needs GEMINI_API_KEY" });

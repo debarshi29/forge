@@ -52,6 +52,8 @@ interface Props {
   switchModel?(spec: string): Promise<void | { warning?: string }>;
   /** Models for the /model picker (wired by the CLI). */
   listModels?(): Promise<ModelOption[]>;
+  /** /context <size>: run the current Ollama model with this context (wired by the CLI). */
+  setContextLength?(tokens: number | undefined): Promise<{ text: string; tone?: "info" | "warn" }>;
   /** Theme to start with. */
   initialTheme?: Theme;
   /** Persist a theme choice (wired by the CLI). */
@@ -74,7 +76,7 @@ const MODE_LABEL: Record<PermissionMode, string> = {
   bypass: "bypass permissions",
 };
 
-export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel, listModels, initialTheme = DEFAULT_THEME, saveTheme, initialPet, savePet, mouse }: Props) {
+export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel, listModels, setContextLength, initialTheme = DEFAULT_THEME, saveTheme, initialPet, savePet, mouse }: Props) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const nextId = useRef(1);
@@ -305,6 +307,13 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
       setTodos([]);
       resetTranscript();
     },
+    setContextLength: setContextLength
+      ? async (tokens) => {
+          const r = await setContextLength(tokens);
+          setUsageTick((n) => n + 1);
+          return r;
+        }
+      : undefined,
     compact: (focus) => runStream((signal) => agent.compact({ ...(focus ? { focus } : {}), signal, reason: "manual" })),
     busy,
     startNewSession: () => {
