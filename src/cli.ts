@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createRequire } from "node:module";
 import path from "node:path";
 import readline from "node:readline/promises";
 import { Command, Option } from "commander";
@@ -30,6 +31,7 @@ interface Flags {
 
 const program = new Command()
   .name("forge")
+  .version(packageVersion(), "-v, --version")
   .description("A provider-agnostic terminal coding agent")
   .argument("[prompt...]", "prompt for interactive mode")
   .option("-p, --print <prompt>", "run one prompt headlessly and print the result")
@@ -203,6 +205,16 @@ function renderText(ev: AgentEvent): void {
       if (ev.stop === "max_tokens") process.stderr.write("\x1b[33m[response cut off at max_tokens]\x1b[0m\n");
       if (ev.stop === "aborted") process.stderr.write("\x1b[33m[interrupted]\x1b[0m\n");
       break;
+  }
+}
+
+/** Version from package.json, found next to dist/ (built) or src/ (dev). */
+function packageVersion(): string {
+  try {
+    const pkg = createRequire(import.meta.url)("../package.json") as { version?: string };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
   }
 }
 
