@@ -14,7 +14,7 @@ Needs Node 22+ and Anthropic credentials (`ANTHROPIC_API_KEY`, or `ant auth logi
 
 ```sh
 pnpm install
-pnpm dev                                   # interactive (line REPL for now)
+pnpm dev                                   # interactive TUI (/help for commands)
 pnpm dev -p "create hello.ts that prints hi, then run it"
 pnpm dev -p "..." --output json            # one JSON event per line
 pnpm dev -p "..." --permission-mode acceptEdits
