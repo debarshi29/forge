@@ -1,0 +1,40 @@
+{
+  "name": "forge",
+  "version": "0.1.0",
+  "description": "A provider-agnostic terminal coding agent (Claude, Gemini, OpenAI, Ollama)",
+  "type": "module",
+  "bin": {
+    "forge": "dist/cli.js"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsup src/cli.ts --format esm --target node22 --clean",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.11.0",
+    "@vscode/ripgrep": "^1.18.0",
+    "commander": "^15.1.0",
+    "diff": "^9.0.0",
+    "execa": "^10.2.1",
+    "fast-glob": "^3.3.3",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/diff": "^8.0.0",
+    "@types/node": "^26.6.6",
+    "tsup": "^9.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.1"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/debarshi29/forge.git"
+  }
+}
