@@ -70,6 +70,7 @@ export class OpenAIProvider implements Provider {
     let finish: string | null = null;
     let usage: OpenAI.CompletionUsage | undefined;
     const calls = new Map<number, { id: string; name: string; args: string; announced: boolean }>();
+    const holdback = this.compat ? new ToolCallHoldback() : undefined;
 
     try {
       const stream = await this.client.chat.completions.create(params, { signal: req.signal });
@@ -84,7 +85,10 @@ export class OpenAIProvider implements Provider {
         if (reasoning) yield { type: "thinking_delta", text: reasoning };
         if (d.content) {
           text += d.content;
-          yield { type: "text_delta", text: d.content };
+          // On compatible servers, hold back anything that may be a text-form
+          // tool call, so raw JSON never flashes up as the model's answer.
+          const shown = holdback ? holdback.push(d.content) : d.content;
+          if (shown) yield { type: "text_delta", text: shown };
         }
         if (d.refusal) refusal += d.refusal;
         for (const tc of d.tool_calls ?? []) {
@@ -113,16 +117,21 @@ export class OpenAIProvider implements Provider {
     const content: Block[] = [];
     if (refusal && !text) text = refusal;
     const ordered = [...calls.entries()].sort((a, b) => a[0] - b[0]).map(([, c]) => c);
-    // Small local models often write the call as JSON text instead of using
-    // tool_calls. On compatible servers, accept a reply that is only that.
+    // Small local models often write calls as JSON text instead of using
+    // tool_calls. On compatible servers, turn those into real calls and keep
+    // only the surrounding prose as the answer.
     if (this.compat && ordered.length === 0 && text) {
-      const parsed = extractTextToolCalls(text, new Set(req.tools.map((t) => t.name)));
-      if (parsed.length) {
-        text = "";
-        parsed.forEach((c, i) =>
+      const found = extractToolCalls(text, new Set(req.tools.map((t) => t.name)));
+      if (found.calls.length) {
+        text = found.rest;
+        found.calls.forEach((c, i) =>
           ordered.push({ id: `call_text_${i}_${Date.now().toString(36)}`, name: c.name, args: JSON.stringify(c.args), announced: false }),
         );
       }
+    }
+    if (holdback) {
+      const remainder = holdback.finish(text);
+      if (remainder) yield { type: "text_delta", text: remainder };
     }
     if (text) content.push({ type: "text", text });
     for (const c of ordered) {
@@ -183,6 +192,77 @@ export function extractTextToolCalls(text: string, toolNames: Set<string>): Arra
     calls.push({ name: o.name, args });
   }
   return calls;
+}
+
+/**
+ * Find text-form tool calls anywhere in a reply: the whole reply (see
+ * extractTextToolCalls), `<tool_call>…</tool_call>` tags, fenced code blocks,
+ * or lines that are a complete call object. Returns the calls and the prose
+ * left after removing them. Blocks that aren't valid calls for known tools
+ * stay in the prose untouched.
+ */
+export function extractToolCalls(text: string, toolNames: Set<string>): { calls: Array<{ name: string; args: unknown }>; rest: string } {
+  const whole = extractTextToolCalls(text, toolNames);
+  if (whole.length) return { calls: whole, rest: "" };
+
+  const calls: Array<{ name: string; args: unknown }> = [];
+  const take = (block: string): boolean => {
+    const found = extractTextToolCalls(block, toolNames);
+    if (!found.length) return false;
+    calls.push(...found);
+    return true;
+  };
+  let rest = text
+    .replace(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g, (m, body: string) => (take(body) ? "" : m))
+    .replace(/```(?:json)?\s*\n([\s\S]*?)\n?```/g, (m, body: string) => (take(body) ? "" : m))
+    .replace(/^[ \t]*(\{.*\})[ \t]*$/gm, (m, line: string) => (take(line) ? "" : m));
+  rest = rest.replace(/\n{3,}/g, "\n\n").trim();
+  return { calls, rest };
+}
+
+/** Start of something that may turn out to be a text-form tool call. */
+const CALL_MARKER = /(^|\n)[ \t]*(\{|\[\s*\{|```|<tool_call>)/;
+
+/**
+ * Streams prose immediately but holds back everything from the first
+ * possible tool-call marker, until the turn ends and we know what it was.
+ */
+export class ToolCallHoldback {
+  private text = "";
+  private emitted = 0;
+  private held = false;
+
+  /** Feed a delta; returns the text that is safe to show now. */
+  push(delta: string): string {
+    this.text += delta;
+    if (this.held) return "";
+    const m = CALL_MARKER.exec(this.text.slice(this.emitted));
+    let end: number;
+    if (m) {
+      end = this.emitted + m.index + m[1]!.length;
+      this.held = true;
+    } else {
+      // Keep the current line back if it could still grow into a marker.
+      const lineStart = this.text.lastIndexOf("\n") + 1;
+      end = Math.max(this.emitted, couldBecomeMarker(this.text.slice(lineStart)) ? lineStart : this.text.length);
+    }
+    const out = this.text.slice(this.emitted, end);
+    this.emitted = end;
+    return out;
+  }
+
+  /** At the end of the turn, given the final prose, return what is still unshown. */
+  finish(finalText: string): string {
+    const shown = this.text.slice(0, this.emitted);
+    return finalText.startsWith(shown) ? finalText.slice(shown.length) : finalText.slice(Math.min(shown.length, finalText.length));
+  }
+}
+
+/** Is this (incomplete) line still a possible start of a tool-call marker? */
+function couldBecomeMarker(line: string): boolean {
+  const s = line.replace(/^[ \t]+/, "");
+  if (s === "" || /^\[\s*$/.test(s)) return true;
+  return ["```", "<tool_call>"].some((m) => m.startsWith(s));
 }
 
 /** Parse streamed arguments; invalid JSON is passed through raw so validation reports it. */

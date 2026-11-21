@@ -149,10 +149,10 @@ const program = new Command()
         listModels: () => listModelOptions(providerSettings),
         initialTheme: findTheme(config.theme) ?? DEFAULT_THEME,
         mouse: input.mouse,
-        initialPet: { kind: config.pet ?? "none", name: config.petName, clicks: config.petClicks ?? true },
+        initialPet: { kind: config.pet ?? "none", name: config.petName, clicks: config.petMouse ?? false },
         savePet: (pet: PetSettings) => {
           try {
-            saveUserSettings({ pet: pet.kind, ...(pet.name ? { petName: pet.name } : {}), petClicks: pet.clicks });
+            saveUserSettings({ pet: pet.kind, ...(pet.name ? { petName: pet.name } : {}), petMouse: pet.clicks });
           } catch {
             // Not fatal.
           }

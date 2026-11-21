@@ -14,7 +14,8 @@ const SettingsSchema = z
     theme: z.string(),
     pet: z.string(),
     petName: z.string(),
-    petClicks: z.boolean(),
+    /** Pet reacts to mouse clicks. Off by default: it disables normal drag-to-select. */
+    petMouse: z.boolean(),
     anthropic: z.object({ baseURL: z.string(), fallbacks: z.boolean() }).partial(),
     openai: z.object({ baseURL: z.string(), contextWindow: z.number().int().positive() }).partial(),
     gemini: z.object({ vertexai: z.boolean(), project: z.string(), location: z.string() }).partial(),
@@ -35,7 +36,7 @@ export interface Config {
   theme?: string;
   pet?: string;
   petName?: string;
-  petClicks?: boolean;
+  petMouse?: boolean;
   anthropic: NonNullable<Settings["anthropic"]>;
   openai: NonNullable<Settings["openai"]>;
   gemini: NonNullable<Settings["gemini"]>;
@@ -98,7 +99,7 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
     theme: merged.theme,
     pet: merged.pet,
     petName: merged.petName,
-    petClicks: merged.petClicks,
+    petMouse: merged.petMouse,
     anthropic: merged.anthropic ?? {},
     openai: merged.openai ?? {},
     gemini: merged.gemini ?? {},
