@@ -4,6 +4,8 @@ import type { Agent } from "../agent/loop.js";
 import { matchCommands, parseCommand, switchTo, type CommandContext } from "../commands/index.js";
 import type { ModelOption } from "../providers/catalog.js";
 import { ModelPicker } from "./ModelPicker.js";
+import { ThemePicker } from "./ThemePicker.js";
+import { DEFAULT_THEME, findTheme, ThemeContext, type Theme } from "./theme.js";
 import type { AskAnswer, AskFn, PermissionMode, PermissionRequest } from "../permissions/index.js";
 import { formatCost } from "../agent/cost.js";
 import type { MemoryFile } from "../agent/memory.js";
@@ -37,6 +39,10 @@ interface Props {
   switchModel?(spec: string): Promise<void>;
   /** Models for the /model picker (wired by the CLI). */
   listModels?(): Promise<ModelOption[]>;
+  /** Theme to start with. */
+  initialTheme?: Theme;
+  /** Persist a theme choice (wired by the CLI). */
+  saveTheme?(name: string): void;
 }
 
 type ItemInput = Item extends infer T ? (T extends Item ? Omit<T, "id"> : never) : never;
@@ -49,7 +55,7 @@ const MODE_LABEL: Record<PermissionMode, string> = {
   bypass: "bypass permissions",
 };
 
-export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel, listModels }: Props) {
+export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel, listModels, initialTheme = DEFAULT_THEME, saveTheme }: Props) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const nextId = useRef(1);
@@ -59,6 +65,11 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
   ]);
   const [sessions, setSessions] = useState<SessionInfo[] | undefined>(() => (pickSession ? listSessions(root, env) : undefined));
   const [pickingModel, setPickingModel] = useState(false);
+  const [theme, setThemeState] = useState<Theme>(initialTheme);
+  const [previewTheme, setPreviewTheme] = useState<Theme | undefined>();
+  const [pickingTheme, setPickingTheme] = useState(false);
+  const [verb, setVerb] = useState(initialTheme.verbs[0]!);
+  const t = previewTheme ?? theme;
   const [modelOptions, setModelOptions] = useState<ModelOption[] | undefined>();
   const [staticKey, setStaticKey] = useState(0);
   const [liveText, setLiveText] = useState("");
@@ -118,6 +129,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
       abortRef.current = ac;
       setBusy(true);
       setStartedAt(Date.now());
+      setVerb(t.verbs[Math.floor(Math.random() * t.verbs.length)]!);
       setNow(Date.now());
       try {
         for await (const ev of agent.send(prompt, ac.signal)) {
@@ -212,6 +224,14 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
           });
         }
       : undefined,
+    openThemePicker: () => setPickingTheme(true),
+    setTheme: (name) => {
+      const next = findTheme(name);
+      if (!next) return false;
+      applyTheme(next);
+      return true;
+    },
+    themeName: theme.name,
     print: (text, tone) => push({ kind: "info", text, tone }),
     clearTranscript: () => resetTranscript(),
     startNewSession: () => {
@@ -275,9 +295,19 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     lastCtrlC.current = t;
   };
 
+  /** Keep a theme: persist it and redraw the transcript in its colours. */
+  function applyTheme(next: Theme) {
+    setPreviewTheme(undefined);
+    setThemeState(next);
+    saveTheme?.(next.name);
+    stdout.write("\x1b[2J\x1b[3J\x1b[H");
+    setStaticKey((k) => k + 1);
+  }
+
   const ctxPct = agent.lastInputTokens ? Math.round((agent.lastInputTokens / agent.contextWindow) * 100) : 0;
 
   return (
+    <ThemeContext.Provider value={t}>
     <Box flexDirection="column">
       <Static key={staticKey} items={items}>
         {(item) => <ItemView key={item.id} item={item} />}
@@ -301,12 +331,28 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
 
       {busy && !pending && (
         <Box marginTop={1}>
-          <Text color="magenta">{SPINNER[Math.floor(now / 120) % SPINNER.length]} </Text>
+          <Text color={t.accent}>{t.spinner[Math.floor(now / 120) % t.spinner.length]} </Text>
           <Text dimColor>
-            {running.length ? `Running ${running.map((r) => r.name).join(", ")}` : liveText ? "Writing" : "Thinking"}… (
+            {running.length ? `Running ${running.map((r) => r.name).join(", ")}` : liveText ? "Writing" : verb}… (
             {formatElapsed(now - startedAt)} · esc to interrupt)
           </Text>
         </Box>
+      )}
+
+      {pickingTheme && !busy && (
+        <ThemePicker
+          current={theme.name}
+          onPreview={setPreviewTheme}
+          onCancel={() => {
+            setPickingTheme(false);
+            setPreviewTheme(undefined);
+          }}
+          onPick={(next) => {
+            setPickingTheme(false);
+            applyTheme(next);
+            push({ kind: "info", text: `${next.icon} Theme set to ${next.label}.` });
+          }}
+        />
       )}
 
       {pickingModel && !busy && (
@@ -337,14 +383,14 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
 
       <Box marginTop={1} flexDirection="column">
         <Input
-          active={!pending && !((sessions || pickingModel) && !busy)}
+          active={!pending && !((sessions || pickingModel || pickingTheme) && !busy)}
           placeholder={busy ? "Working… (type /help, or Esc to interrupt)" : "Ask Forge to do something"}
           onSubmit={submit}
           onCtrlC={onCtrlC}
           suggest={slashSuggestions}
         />
         <Box justifyContent="space-between" paddingX={1}>
-          <Text color={mode === "default" ? "gray" : mode === "plan" ? "cyan" : mode === "bypass" ? "red" : "yellow"}>
+          <Text color={mode === "default" ? t.muted : mode === "plan" ? t.highlight : mode === "bypass" ? t.error : t.warning}>
             {mode === "default" ? "" : "⏵⏵ "}
             {MODE_LABEL[mode]} <Text dimColor>(shift+tab)</Text>
           </Text>
@@ -355,6 +401,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
         </Box>
       </Box>
     </Box>
+    </ThemeContext.Provider>
   );
 }
 
@@ -363,4 +410,3 @@ function slashSuggestions(value: string): Suggestion[] {
   return value.startsWith("/") && !/\s/.test(value) ? matchCommands(value) : [];
 }
 
-const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];

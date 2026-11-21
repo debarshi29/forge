@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -11,6 +11,7 @@ const SettingsSchema = z
     effort: z.enum(["low", "medium", "high", "xhigh", "max"]),
     permissionMode: z.enum(PERMISSION_MODES as [PermissionMode, ...PermissionMode[]]),
     maxTokens: z.number().int().positive(),
+    theme: z.string(),
     anthropic: z.object({ baseURL: z.string(), fallbacks: z.boolean() }).partial(),
     openai: z.object({ baseURL: z.string(), contextWindow: z.number().int().positive() }).partial(),
     gemini: z.object({ vertexai: z.boolean(), project: z.string(), location: z.string() }).partial(),
@@ -28,6 +29,7 @@ export interface Config {
   effort: NonNullable<Settings["effort"]>;
   permissionMode: PermissionMode;
   maxTokens?: number;
+  theme?: string;
   anthropic: NonNullable<Settings["anthropic"]>;
   openai: NonNullable<Settings["openai"]>;
   gemini: NonNullable<Settings["gemini"]>;
@@ -87,6 +89,7 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
     effort: merged.effort ?? "high",
     permissionMode: merged.permissionMode ?? "default",
     maxTokens: merged.maxTokens,
+    theme: merged.theme,
     anthropic: merged.anthropic ?? {},
     openai: merged.openai ?? {},
     gemini: merged.gemini ?? {},
@@ -94,4 +97,20 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
     lmstudio: merged.lmstudio ?? {},
     sources,
   };
+}
+
+/**
+ * Merge keys into ~/.forge/settings.json, keeping everything else in it.
+ * Used for choices made in the UI, like /theme.
+ */
+export function saveUserSettings(patch: Settings, env: NodeJS.ProcessEnv = process.env): void {
+  const file = path.join(forgeHome(env), "settings.json");
+  let current: Record<string, unknown> = {};
+  try {
+    current = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  } catch {
+    // missing or unreadable: start fresh
+  }
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ ...current, ...patch }, null, 2) + "\n");
 }

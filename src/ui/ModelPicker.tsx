@@ -1,4 +1,5 @@
 import { Box, Text, useInput } from "ink";
+import { useTheme } from "./theme.js";
 import { useState } from "react";
 import type { ModelOption } from "../providers/catalog.js";
 
@@ -18,6 +19,7 @@ const PROVIDER_LABEL: Record<string, string> = {
 };
 
 export function ModelPicker({ options, current, onPick, onCancel }: Props) {
+  const t = useTheme();
   const list = options ?? [];
   const [i, setI] = useState(() => Math.max(0, list.findIndex((o) => o.spec === current)));
   const [initialised, setInitialised] = useState(options !== undefined);
@@ -36,8 +38,8 @@ export function ModelPicker({ options, current, onPick, onCancel }: Props) {
   });
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-      <Text bold color="cyan">
+    <Box flexDirection="column" borderStyle="round" borderColor={t.highlight} paddingX={1}>
+      <Text bold color={t.highlight}>
         Select a model <Text dimColor>(↑/↓, Enter to switch, Esc to cancel · or type /model provider:model)</Text>
       </Text>
       {!options && <Text dimColor>Looking for models…</Text>}
@@ -51,10 +53,10 @@ export function ModelPicker({ options, current, onPick, onCancel }: Props) {
                 {PROVIDER_LABEL[o.provider] ?? o.provider}
               </Text>
             )}
-            <Text color={selected ? "cyan" : o.available ? undefined : "gray"}>
+            <Text color={selected ? t.highlight : o.available ? undefined : t.muted}>
               {selected ? "❯ " : "  "}
               {o.label}
-              {o.spec === current ? <Text color="green"> ✓ current</Text> : null}
+              {o.spec === current ? <Text color={t.success}> ✓ current</Text> : null}
               {o.note ? <Text dimColor> · {o.note}</Text> : null}
             </Text>
           </Box>

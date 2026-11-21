@@ -1,4 +1,5 @@
 /** Pure text formatting for the TUI (no Ink/React here, so it is easy to test). */
+import { fg } from "./theme.js";
 
 const ESC = "\x1b[";
 export const ansi = {
@@ -12,9 +13,18 @@ export const ansi = {
   magenta: (s: string) => `${ESC}35m${s}${ESC}39m`,
 };
 
-function inline(line: string): string {
+/** Optional theme colours (hex); unset means the terminal's basic ANSI colours. */
+export interface Palette {
+  code?: string;
+  diffAdd?: string;
+  diffDel?: string;
+}
+
+const paint = (hex: string | undefined, fallback: (s: string) => string) => (s: string) => (hex ? fg(hex, s) : fallback(s));
+
+function inline(line: string, code: (s: string) => string): string {
   return line
-    .replace(/`([^`]+)`/g, (_m, c: string) => ansi.cyan(c))
+    .replace(/`([^`]+)`/g, (_m, c: string) => code(c))
     .replace(/\*\*([^*]+)\*\*/g, (_m, c: string) => ansi.bold(c))
     .replace(/(^|[^*\w])\*([^*\s][^*]*)\*(?!\w)/g, (_m, pre: string, c: string) => pre + ansi.italic(c))
     .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, (_m, label: string, url: string) => `${label} ${ansi.dim(`(${url})`)}`);
@@ -24,7 +34,8 @@ function inline(line: string): string {
  * A small Markdown-to-ANSI renderer covering what models actually emit:
  * headings, lists, quotes, fenced code, inline code, bold, italic, links.
  */
-export function renderMarkdown(md: string): string {
+export function renderMarkdown(md: string, palette: Palette = {}): string {
+  const code = paint(palette.code, ansi.cyan);
   const out: string[] = [];
   let inFence = false;
   for (const line of md.split("\n")) {
@@ -34,42 +45,44 @@ export function renderMarkdown(md: string): string {
       continue;
     }
     if (inFence) {
-      out.push(ansi.cyan(`  ${line}`));
+      out.push(code(`  ${line}`));
       continue;
     }
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (heading) {
-      out.push(ansi.bold(inline(heading[2]!)));
+      out.push(ansi.bold(inline(heading[2]!, code)));
       continue;
     }
     const bullet = /^(\s*)[-*+]\s+(.*)$/.exec(line);
     if (bullet) {
-      out.push(`${bullet[1]}• ${inline(bullet[2]!)}`);
+      out.push(`${bullet[1]}• ${inline(bullet[2]!, code)}`);
       continue;
     }
     if (/^\s*>\s?/.test(line)) {
-      out.push(ansi.dim(`│ ${inline(line.replace(/^\s*>\s?/, ""))}`));
+      out.push(ansi.dim(`│ ${inline(line.replace(/^\s*>\s?/, ""), code)}`));
       continue;
     }
     if (/^\s*([-*_])\1{2,}\s*$/.test(line)) {
       out.push(ansi.dim("─".repeat(40)));
       continue;
     }
-    out.push(inline(line));
+    out.push(inline(line, code));
   }
   return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
 }
 
 /** Colour a unified diff, dropping the file headers, capped at maxLines. */
-export function renderDiff(patch: string, maxLines = 30): string {
+export function renderDiff(patch: string, maxLines = 30, palette: Palette = {}): string {
+  const add = paint(palette.diffAdd, ansi.green);
+  const del = paint(palette.diffDel, ansi.red);
   const lines = patch
     .split("\n")
     .filter((l) => !/^(Index:|={3,}|---|\+\+\+|\\ No newline)/.test(l))
     .filter((l, i, all) => !(i === all.length - 1 && l === ""));
   const shown = lines.slice(0, maxLines).map((l) => {
     if (l.startsWith("@@")) return ansi.dim(l);
-    if (l.startsWith("+")) return ansi.green(l);
-    if (l.startsWith("-")) return ansi.red(l);
+    if (l.startsWith("+")) return add(l);
+    if (l.startsWith("-")) return del(l);
     return ansi.dim(l);
   });
   if (lines.length > maxLines) shown.push(ansi.dim(`… ${lines.length - maxLines} more lines`));

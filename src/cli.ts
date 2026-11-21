@@ -11,7 +11,8 @@ import { loadMemory } from "./agent/memory.js";
 import { findSession, listSessions, resumeInto, Session } from "./agent/session.js";
 import { buildSystemPrompt } from "./agent/systemPrompt.js";
 import { messagesToItems } from "./ui/history.js";
-import { loadConfig } from "./config/index.js";
+import { loadConfig, saveUserSettings } from "./config/index.js";
+import { DEFAULT_THEME, findTheme } from "./ui/theme.js";
 import { PERMISSION_MODES, Permissions, type AskFn, type PermissionMode } from "./permissions/index.js";
 import { listModelOptions, resolveModelForUse } from "./providers/catalog.js";
 import type { ProviderSettings } from "./providers/registry.js";
@@ -142,6 +143,14 @@ const program = new Command()
           agent.setModel(next.provider, next.model, buildSystemPrompt({ root, cwd: root, model: next.spec, memory }));
         },
         listModels: () => listModelOptions(providerSettings),
+        initialTheme: findTheme(config.theme) ?? DEFAULT_THEME,
+        saveTheme: (name: string) => {
+          try {
+            saveUserSettings({ theme: name });
+          } catch {
+            // Not fatal: the theme still applies for this session.
+          }
+        },
       }),
       { exitOnCtrlC: false },
     );
