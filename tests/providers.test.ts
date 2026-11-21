@@ -7,7 +7,7 @@ import { Permissions } from "../src/permissions/index.js";
 import { fromAnthropicMessage } from "../src/providers/anthropic.js";
 import { FakeProvider } from "../src/providers/fake.js";
 import { GeminiProvider, sanitizeSchema, toGeminiContents } from "../src/providers/gemini.js";
-import { extractTextToolCalls, OpenAIProvider, toOpenAIMessages } from "../src/providers/openai.js";
+import { extractTextToolCalls, extractToolCalls, OpenAIProvider, toOpenAIMessages } from "../src/providers/openai.js";
 import { resolveModel } from "../src/providers/registry.js";
 import type { Message, StreamEvent, StreamRequest } from "../src/providers/types.js";
 import { defaultTools, toToolSpec } from "../src/tools/registry.js";
@@ -108,6 +108,49 @@ describe("OpenAI adapter", () => {
     const strict = new OpenAIProvider({ client: fakeOpenAI([chunk({ content: '{"name": "read", "arguments": {}}' }, "stop")]) });
     const strictEnd = (await collect(strict.stream(req()))).at(-1) as Extract<StreamEvent, { type: "message_end" }>;
     expect(strictEnd.stop).toBe("end_turn");
+  });
+
+  it("finds text tool calls inside prose, tags and fences, keeping the prose", () => {
+    const names = new Set(["write", "read"]);
+    expect(extractToolCalls('Sure, writing it now.\n```json\n{"name": "write", "arguments": {"path": "a"}}\n```\nDone soon.', names)).toEqual({
+      calls: [{ name: "write", args: { path: "a" } }],
+      rest: "Sure, writing it now.\n\nDone soon.",
+    });
+    expect(extractToolCalls('<tool_call>\n{"name": "read", "arguments": {"path": "b"}}\n</tool_call>', names).calls).toHaveLength(1);
+    expect(extractToolCalls('Reading:\n{"name": "read", "arguments": {}}', names)).toEqual({
+      calls: [{ name: "read", args: {} }],
+      rest: "Reading:",
+    });
+    // Example code that isn't a call for a known tool stays as text.
+    const prose = 'Config looks like:\n```json\n{"name": "my-app", "version": 1}\n```';
+    expect(extractToolCalls(prose, names)).toEqual({ calls: [], rest: prose.trim() });
+  });
+
+  it("never streams text-form tool calls to the screen", async () => {
+    const reply = 'Let me create it.\n```json\n{"name": "read", "arguments": {"path": "a.ts"}}\n```';
+    // Split into awkward chunks, as a real stream would.
+    const chunks = reply.match(/.{1,3}/gs)!.map((c) => chunk({ content: c }));
+    const p = new OpenAIProvider({ compat: true, client: fakeOpenAI([...chunks, chunk({}, "stop")]) });
+    const events = await collect(p.stream(req()));
+    const shown = events.filter((e) => e.type === "text_delta").map((e) => (e as { text: string }).text).join("");
+    expect(shown).toBe("Let me create it.\n");
+    expect(shown).not.toContain("{");
+    const end = events.at(-1) as Extract<StreamEvent, { type: "message_end" }>;
+    expect(end.message.content).toEqual([
+      { type: "text", text: "Let me create it." },
+      { type: "tool_use", id: expect.any(String), name: "read", input: { path: "a.ts" } },
+    ]);
+  });
+
+  it("still streams ordinary answers in full, including held-back code", async () => {
+    const reply = "Here is an example:\n```ts\nconst x = { a: 1 };\n```\nThat's it.";
+    const chunks = reply.match(/.{1,4}/gs)!.map((c) => chunk({ content: c }));
+    const p = new OpenAIProvider({ compat: true, client: fakeOpenAI([...chunks, chunk({}, "stop")]) });
+    const events = await collect(p.stream(req()));
+    const shown = events.filter((e) => e.type === "text_delta").map((e) => (e as { text: string }).text).join("");
+    expect(shown).toBe(reply);
+    const end = events.at(-1) as Extract<StreamEvent, { type: "message_end" }>;
+    expect(end.stop).toBe("end_turn");
   });
 
   it("maps neutral history to chat messages", () => {

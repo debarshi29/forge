@@ -239,8 +239,11 @@ describe("TUI", () => {
     await sleep(50);
     await type("\r");
     await until(() => stdout.text().includes("You adopted Biscuit the dog"));
-    expect(saved.at(-1)).toMatchObject({ kind: "dog", name: "Biscuit", clicks: true });
-    // Mouse reporting is switched on for the clickable pet.
+    // Clicks are opt-in, so text selection keeps working by default.
+    expect(saved.at(-1)).toMatchObject({ kind: "dog", name: "Biscuit", clicks: false });
+    await sleep(100);
+    expect(stdout.frames.join("")).not.toContain("\x1b[?1000h");
+    await type("/pet clicks on\r");
     await until(() => stdout.frames.join("").includes("\x1b[?1000h"));
 
     await sleep(100);

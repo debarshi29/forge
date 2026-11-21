@@ -24,6 +24,7 @@ interface Props {
 }
 
 const TICK_MS = 250;
+const IDLE_TICK_MS = 1000;
 const COMBO_WINDOW_MS = 1200;
 const SLEEP_AFTER_MS = 90_000;
 
@@ -41,10 +42,17 @@ export function Pet({ kind, name, status: rawStatus, statusUntil, clickable, mou
   const combo = useRef({ count: 0, last: 0 });
   const lastActive = useRef(now());
 
+  // Animate briskly only while something is happening. An idle pet redraws
+  // about once a second (and only changes when it blinks), so the terminal
+  // isn't constantly repainting under the user's text selection.
+  const lively =
+    (reaction !== undefined && reaction.until > now()) ||
+    (quip !== undefined && quip.until > now()) ||
+    (rawStatus !== "idle" && (statusUntil === undefined || statusUntil > now()));
   useEffect(() => {
-    const id = setInterval(() => setTick((n) => n + 1), TICK_MS);
+    const id = setInterval(() => setTick((n) => n + 1), lively ? TICK_MS : IDLE_TICK_MS);
     return () => clearInterval(id);
-  }, []);
+  }, [lively]);
 
   useEffect(() => {
     if (rawStatus !== "idle") lastActive.current = now();
@@ -91,12 +99,12 @@ export function Pet({ kind, name, status: rawStatus, statusUntil, clickable, mou
   else if (status === "done") mood = "done";
   else if (status === "error") mood = "oops";
   else if (idleFor > SLEEP_AFTER_MS) mood = "sleep";
-  else mood = tick % 16 === 0 ? "blink" : "idle";
+  else mood = !lively && tick % 7 === 6 ? "blink" : "idle";
 
-  // Wiggle faster when excited.
-  const frame = mood === "party" || mood === "dizzy" ? tick % 2 : Math.floor(tick / 3) % 2;
+  // Wiggle fast when excited, gently when busy, not at all when idle.
+  const frame = mood === "party" || mood === "dizzy" ? tick % 2 : lively ? Math.floor(tick / 3) % 2 : 0;
   const body = kind.draw(faceFor(mood, tick), frame);
-  const effect = effectLine(mood, tick);
+  const effect = effectLine(mood, mood === "sleep" ? Math.floor(tick / 3) : tick);
   const bubble =
     quip && quip.until > at
       ? quip.text
@@ -130,7 +138,9 @@ export function Pet({ kind, name, status: rawStatus, statusUntil, clickable, mou
           {pats ? <Text color={t.error}> ♥ {pats}</Text> : null}
         </Text>
         {bubble ? <Text color={t.highlight}>‹ {bubble} ›</Text> : null}
-        {!pats && mood === "idle" ? <Text dimColor>{clickable ? "(click me! or Ctrl+P)" : "(Ctrl+P to pet)"}</Text> : null}
+        {!pats && mood === "idle" ? (
+          <Text dimColor>{clickable ? "(click me! or Ctrl+P)" : "(Ctrl+P to pet · /pet clicks on to click)"}</Text>
+        ) : null}
       </Box>
     </Box>
   );

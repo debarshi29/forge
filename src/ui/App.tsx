@@ -85,7 +85,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
   const [theme, setThemeState] = useState<Theme>(initialTheme);
   const [previewTheme, setPreviewTheme] = useState<Theme | undefined>();
   const [pickingTheme, setPickingTheme] = useState(false);
-  const [pet, setPetState] = useState<PetSettings>(() => initialPet ?? { kind: "none", clicks: true });
+  const [pet, setPetState] = useState<PetSettings>(() => initialPet ?? { kind: "none", clicks: false });
   const [pickingPet, setPickingPet] = useState(false);
   const [petFlash, setPetFlash] = useState<{ status: PetStatus; until: number } | undefined>();
   const pokeRef = useRef<() => void>(undefined);
@@ -165,6 +165,12 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
               setLiveText(textBuf.current);
               break;
             case "assistant_message":
+              // The final message is authoritative: adapters may strip text
+              // (e.g. tool calls a local model wrote as JSON) after streaming.
+              textBuf.current = ev.message.content
+                .filter((b) => b.type === "text")
+                .map((b) => b.text)
+                .join("");
               flush();
               setUsageTick((n) => n + 1);
               break;
@@ -269,6 +275,10 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     setMode,
     exit: () => exit(),
   };
+  // submit is memoised, so it reads the context through a ref; otherwise
+  // commands would see state from an earlier render (e.g. "no pet yet").
+  const commandCtxRef = useRef(commandCtx);
+  commandCtxRef.current = commandCtx;
 
   const submit = useCallback(
     (value: string) => {
@@ -277,7 +287,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
       if (cmd) {
         push({ kind: "user", text });
         if (!cmd.command) return push({ kind: "info", text: `Unknown command /${cmd.name}. Try /help.`, tone: "error" });
-        void Promise.resolve(cmd.command.run(cmd.args, commandCtx)).catch((err: unknown) =>
+        void Promise.resolve(cmd.command.run(cmd.args, commandCtxRef.current)).catch((err: unknown) =>
           push({ kind: "info", text: String(err), tone: "error" }),
         );
         return;
@@ -286,8 +296,6 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
       push({ kind: "user", text });
       void runTurn(text);
     },
-    // commandCtx is rebuilt each render; that's fine for these callbacks.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [busy, push, runTurn],
   );
 
@@ -413,7 +421,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
             }
             const name = kind.name === pet.kind ? (pet.name ?? kind.defaultName) : kind.defaultName;
             updatePet({ kind: kind.name, name });
-            push({ kind: "info", text: `You adopted ${name} the ${kind.label.toLowerCase()}! Click it, or press Ctrl+P to pet it.` });
+            push({ kind: "info", text: `You adopted ${name} the ${kind.label.toLowerCase()}! Press Ctrl+P to pet it, or /pet clicks on to pet it with the mouse.` });
           }}
         />
       )}

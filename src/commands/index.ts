@@ -166,8 +166,8 @@ export const COMMANDS: SlashCommand[] = [
           ctx.updatePet?.({ clicks: v === "on" });
           return ctx.print(
             v === "on"
-              ? "Mouse clicks on: click your pet! (The terminal's mouse-wheel scrolling is paused while this is on.)"
-              : "Mouse clicks off: scrolling works normally. Press Ctrl+P (or /pet) to pet.",
+              ? "Mouse clicks on: click your pet! While this is on the terminal sends mouse actions to Forge, so hold Shift to select/copy text (Shift+drag) or to scroll with the wheel. /pet clicks off turns it back off."
+              : "Mouse clicks off: selecting, copying and scrolling work normally again. Press Ctrl+P (or /pet) to pet.",
           );
         }
         case "hide":
