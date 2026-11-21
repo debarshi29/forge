@@ -24,8 +24,8 @@ describe("config", () => {
     expect(() => loadConfig(home, {}, { FORGE_HOME: home })).toThrow(/effort/);
   });
 
-  it("defaults to Claude Opus 5.5", async () => {
+  it("defaults to an automatically chosen Ollama model", async () => {
     const home = await tempDir();
-    expect(loadConfig(home, {}, { FORGE_HOME: home }).model).toBe("anthropic:claude-opus-5-5");
+    expect(loadConfig(home, {}, { FORGE_HOME: home }).model).toBe("ollama");
   });
 });

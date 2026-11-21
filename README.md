@@ -31,7 +31,7 @@ pnpm dev -p "..." --output json            # one JSON event per line
 pnpm dev -p "..." --permission-mode acceptEdits
 ```
 
-Options: `--model provider:model` (default `anthropic:claude-opus-5-5`), `--effort low|medium|high|xhigh|max`,
+Options: `--model provider:model` (default: an installed Ollama model), `--effort low|medium|high|xhigh|max`,
 `--permission-mode default|acceptEdits|plan|bypass`, `--cwd <dir>`.
 
 Settings are merged from `~/.forge/settings.json`, then `<project>/.forge/settings.json`, then `FORGE_MODEL`, then flags:
@@ -42,15 +42,18 @@ Settings are merged from `~/.forge/settings.json`, then `<project>/.forge/settin
 
 ### Providers and models
 
-Pick a model with `--model provider:model` or switch mid-conversation with `/model provider:model`.
+By default Forge uses a model from your local Ollama, preferring tool-capable coding models (e.g. `qwen2.5-coder`).
+Pick another with `--model provider:model`, or inside the TUI type `/model` (or `/models`) to choose from a list of your
+installed Ollama models and the Claude, Gemini and OpenAI models. `/model provider:model` switches directly. Set a
+permanent default with `"model"` in `~/.forge/settings.json`.
 The conversation carries over: each provider replays its own turns verbatim and skips other providers' reasoning.
 
 | Provider | Example | Credentials / setup |
 | --- | --- | --- |
-| Anthropic (default) | `anthropic:claude-opus-5-5`, `anthropic:claude-sonnet-5-5` | `ANTHROPIC_API_KEY` or `ant auth login` |
+| Ollama (default) | `ollama` (auto-pick), `ollama:qwen2.5-coder:3b` | a running Ollama (`OLLAMA_HOST` or `"ollama": {"baseURL": "…"}`) |
+| Anthropic | `anthropic:claude-opus-5-5`, `anthropic:claude-sonnet-5-5` | `ANTHROPIC_API_KEY` or `ant auth login` |
 | Google Gemini | `gemini:gemini-2.5-pro` | `GEMINI_API_KEY`, or `"gemini": {"vertexai": true, "project": "…", "location": "…"}` |
 | OpenAI | `openai:gpt-5` | `OPENAI_API_KEY`; `"openai": {"baseURL": "…"}` for other compatible endpoints |
-| Ollama | `ollama:qwen2.5-coder:3b` | a running Ollama (`OLLAMA_HOST` or `"ollama": {"baseURL": "…"}`) |
 | LM Studio | `lmstudio:<model>` | LM Studio's server on `localhost:1234` |
 
 Local models have small context windows; set `"ollama": {"contextWindow": 32768}` to match yours. Small local models

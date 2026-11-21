@@ -1,7 +1,9 @@
 import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Agent } from "../agent/loop.js";
-import { matchCommands, parseCommand, type CommandContext } from "../commands/index.js";
+import { matchCommands, parseCommand, switchTo, type CommandContext } from "../commands/index.js";
+import type { ModelOption } from "../providers/catalog.js";
+import { ModelPicker } from "./ModelPicker.js";
 import type { AskAnswer, AskFn, PermissionMode, PermissionRequest } from "../permissions/index.js";
 import { formatCost } from "../agent/cost.js";
 import type { MemoryFile } from "../agent/memory.js";
@@ -32,7 +34,9 @@ interface Props {
   memory?: MemoryFile[];
   env?: NodeJS.ProcessEnv;
   /** Switch provider/model (wired by the CLI, which knows the settings). */
-  switchModel?(spec: string): void;
+  switchModel?(spec: string): Promise<void>;
+  /** Models for the /model picker (wired by the CLI). */
+  listModels?(): Promise<ModelOption[]>;
 }
 
 type ItemInput = Item extends infer T ? (T extends Item ? Omit<T, "id"> : never) : never;
@@ -45,7 +49,7 @@ const MODE_LABEL: Record<PermissionMode, string> = {
   bypass: "bypass permissions",
 };
 
-export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel }: Props) {
+export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel, listModels }: Props) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const nextId = useRef(1);
@@ -54,6 +58,8 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     ...(initialItems ?? []).map((it) => ({ ...it, id: nextId.current++ }) as Item),
   ]);
   const [sessions, setSessions] = useState<SessionInfo[] | undefined>(() => (pickSession ? listSessions(root, env) : undefined));
+  const [pickingModel, setPickingModel] = useState(false);
+  const [modelOptions, setModelOptions] = useState<ModelOption[] | undefined>();
   const [staticKey, setStaticKey] = useState(0);
   const [liveText, setLiveText] = useState("");
   const [liveThinking, setLiveThinking] = useState("");
@@ -192,9 +198,19 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     allowBypass,
     memory,
     switchModel: switchModel
-      ? (spec: string) => {
-          switchModel(spec);
+      ? async (spec: string) => {
+          await switchModel(spec);
           setUsageTick((n) => n + 1);
+        }
+      : undefined,
+    openModelPicker: listModels
+      ? () => {
+          setModelOptions(undefined);
+          setPickingModel(true);
+          void listModels().then(setModelOptions, (err: unknown) => {
+            setPickingModel(false);
+            push({ kind: "info", text: `Could not list models: ${String(err)}`, tone: "error" });
+          });
         }
       : undefined,
     print: (text, tone) => push({ kind: "info", text, tone }),
@@ -295,6 +311,18 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
         </Box>
       )}
 
+      {pickingModel && !busy && (
+        <ModelPicker
+          options={modelOptions}
+          current={agent.modelSpec}
+          onCancel={() => setPickingModel(false)}
+          onPick={(o) => {
+            setPickingModel(false);
+            if (o.spec !== agent.modelSpec) void switchTo(o.spec, commandCtx);
+          }}
+        />
+      )}
+
       {sessions && !busy && (
         <SessionPicker sessions={sessions} onPick={resume} onCancel={() => setSessions(undefined)} />
       )}
@@ -311,7 +339,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
 
       <Box marginTop={1} flexDirection="column">
         <Input
-          active={!pending && !(sessions && !busy)}
+          active={!pending && !((sessions || pickingModel) && !busy)}
           placeholder={busy ? "Working… (type /help, or Esc to interrupt)" : "Ask Forge to do something"}
           onSubmit={submit}
           onChange={setInputValue}

@@ -3,7 +3,8 @@ import { GeminiProvider, type GeminiOptions } from "./gemini.js";
 import { OpenAIProvider } from "./openai.js";
 import type { Provider } from "./types.js";
 
-export const DEFAULT_MODEL = "anthropic:claude-opus-5-5";
+/** "ollama" = an installed Ollama model, picked at startup (see catalog.ts). */
+export const DEFAULT_MODEL = "ollama";
 export const PROVIDERS = ["anthropic", "openai", "gemini", "ollama", "lmstudio"] as const;
 
 export interface ResolvedModel {
