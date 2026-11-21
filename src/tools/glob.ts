@@ -17,7 +17,7 @@ export const globTool = defineTool({
   readOnly: true,
   summarize: (i) => (i.path ? `${i.pattern} in ${i.path}` : i.pattern),
   async run(input, ctx) {
-    const dir = resolvePath(ctx, input.path ?? ".");
+    const dir = resolvePath(ctx, input.path ?? ".", { allowOutside: true });
     const entries = await fg(input.pattern, {
       cwd: dir,
       absolute: true,

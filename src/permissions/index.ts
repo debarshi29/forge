@@ -1,3 +1,5 @@
+import path from "node:path";
+import { isInside, normalizeInputPath } from "../tools/paths.js";
 import type { Tool } from "../tools/types.js";
 import { dangerReason } from "./danger.js";
 import { hasShellTricks, parseRules, ruleMatches, splitCommand, type ParsedRules, type Rule, type RuleSet } from "./rules.js";
@@ -18,6 +20,8 @@ export interface PermissionRequest {
   warning?: string;
   /** False hides "don't ask again" (dangerous commands). Default true. */
   allowAlways?: boolean;
+  /** Replaces the "don't ask again" label (e.g. for a directory outside the project). */
+  alwaysLabel?: string;
 }
 
 /**
@@ -32,6 +36,8 @@ export type Decision = { allow: true } | { allow: false; reason: string };
 export type PlanDecision = { approved: true; mode: PermissionMode } | { approved: false; feedback?: string; reason: string };
 
 const EDIT_TOOLS = new Set(["write", "edit"]);
+/** Read-only tools that take a `path` and may look outside the project with consent. */
+const READ_PATH_TOOLS = new Set(["read", "ls", "glob", "grep"]);
 
 export interface PermissionsOptions {
   /** allow / deny / ask rules from settings. */
@@ -97,7 +103,9 @@ export class Permissions {
       allow: raw(this.rules.allow),
       deny: raw(this.rules.deny),
       ask: raw(this.rules.ask),
-      session: [...this.sessionAllow].map((k) => (k.startsWith("bash:") ? `bash(${k.slice(5)})` : k)),
+      session: [...this.sessionAllow].map((k) =>
+        k.startsWith("bash:") ? `bash(${k.slice(5)})` : k.startsWith("outside:") ? `reading ${k.slice(8)} (outside the project)` : k,
+      ),
     };
   }
 
@@ -111,6 +119,25 @@ export class Permissions {
     const denied = this.firstMatch(this.rules.deny, tool.name, input, ctx, segments, "any");
     if (denied) {
       return { allow: false, reason: `Blocked by the permission rule "${denied.raw}" in settings. Don't retry this; find another way or ask the user.` };
+    }
+
+    // 1b. Read-only file tools may look outside the project, but only with consent.
+    const outside = this.outsidePath(tool, input);
+    if (outside && this._mode !== "bypass") {
+      if (this.firstMatch(this.rules.allow, tool.name, input, ctx, undefined, "any")) return { allow: true };
+      if ([...this.sessionAllow].some((k) => k.startsWith("outside:") && isInside(k.slice(8), outside))) return { allow: true };
+      if (!this.ask) {
+        return {
+          allow: false,
+          reason: `${outside} is outside the project, and no one can approve reading it in a non-interactive run. An allow rule like ${tool.name}(${outside.split(path.sep).join("/")}/**) would permit it.`,
+        };
+      }
+      const dir = tool.name === "read" ? path.dirname(outside) : outside;
+      return this.askUser(tool.name, input, summary, {
+        warning: `This looks outside the project, at ${outside}.`,
+        alwaysKey: `outside:${dir}`,
+        alwaysLabel: `Yes, and allow reading ${dir} this session`,
+      });
     }
 
     // 2. Dangerous commands always need a human.
@@ -173,13 +200,27 @@ export class Permissions {
     return { approved: true, mode };
   }
 
-  private async askUser(tool: string, input: unknown, summary: string, extra: Partial<PermissionRequest>): Promise<Decision> {
-    const answer = await this.ask!({ tool, input, summary, kind: "tool", ...extra });
-    if (answer.kind === "always" && extra.allowAlways !== false) this.sessionAllow.add(sessionKey(tool, summary));
+  private async askUser(
+    tool: string,
+    input: unknown,
+    summary: string,
+    extra: Partial<PermissionRequest> & { alwaysKey?: string },
+  ): Promise<Decision> {
+    const { alwaysKey, ...req } = extra;
+    const answer = await this.ask!({ tool, input, summary, kind: "tool", ...req });
+    if (answer.kind === "always" && extra.allowAlways !== false) this.sessionAllow.add(alwaysKey ?? sessionKey(tool, summary));
     if (answer.kind === "no") {
       return { allow: false, reason: answer.reason ? `The user denied this: ${answer.reason}` : "The user denied this tool call." };
     }
     return { allow: true };
+  }
+
+  /** The absolute path a read-only file tool would touch, if it is outside the project. */
+  private outsidePath(tool: Tool, input: unknown): string | undefined {
+    if (!READ_PATH_TOOLS.has(tool.name)) return undefined;
+    const p = (input as { path?: unknown } | undefined)?.path;
+    const abs = path.resolve(this.root, normalizeInputPath(typeof p === "string" ? p : "."));
+    return isInside(this.root, abs) ? undefined : abs;
   }
 
   /**

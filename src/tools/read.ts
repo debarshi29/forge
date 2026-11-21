@@ -31,7 +31,7 @@ export const readTool = defineTool({
   readOnly: true,
   summarize: (i) => i.path,
   async run(input, ctx) {
-    const abs = resolvePath(ctx, input.path);
+    const abs = resolvePath(ctx, input.path, { allowOutside: true });
     let stat;
     try {
       stat = await fs.stat(abs);

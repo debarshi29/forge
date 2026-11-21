@@ -7,14 +7,15 @@ const MAX_ENTRIES = 500;
 
 export const lsTool = defineTool({
   name: "ls",
-  description: `List a directory's entries (directories end with "/"). Use glob to find files recursively.`,
+  description: `List a directory's entries (directories end with "/"). Use glob to find files recursively.
+- path may be outside the project (e.g. "C:/" or "~"); the user is asked to approve that.`,
   schema: z.object({
     path: z.string().optional().describe("Directory (default: working directory)"),
   }),
   readOnly: true,
   summarize: (i) => i.path ?? ".",
   async run(input, ctx) {
-    const abs = resolvePath(ctx, input.path ?? ".");
+    const abs = resolvePath(ctx, input.path ?? ".", { allowOutside: true });
     let entries;
     try {
       entries = await fs.readdir(abs, { withFileTypes: true });

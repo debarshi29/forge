@@ -1,4 +1,5 @@
 import path from "node:path";
+import { normalizeInputPath } from "../tools/paths.js";
 
 /**
  * A permission rule from settings: `tool` or `tool(pattern)`.
@@ -78,7 +79,7 @@ export function bashMatches(pattern: string, command: string): boolean {
 }
 
 function pathMatches(pattern: string, target: string, root: string): boolean {
-  const abs = path.resolve(root, target);
+  const abs = path.resolve(root, normalizeInputPath(target));
   const rel = path.relative(root, abs).split(path.sep).join("/") || ".";
   let pat = pattern.replace(/\\/g, "/");
   if (pat.endsWith("/")) pat += "**";

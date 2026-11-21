@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { dangerReason } from "../src/permissions/danger.js";
 import { Permissions, type AskFn, type PermissionRequest, type RuleSet } from "../src/permissions/index.js";
@@ -150,6 +151,34 @@ describe("Permissions", () => {
     const d = await p.approvePlan("plan");
     expect(d).toMatchObject({ approved: false, feedback: "use zod instead" });
     expect(p.mode).toBe("plan");
+  });
+
+  it("asks before read-only tools look outside the project, and remembers the directory", async () => {
+    const { p, asked } = perms({}, "default", "always");
+    const outsideDir = path.resolve(root, "..", "elsewhere");
+    expect(await p.check(tools.ls!, { path: path.parse(root).root })).toEqual({ allow: true });
+    expect(asked[0]).toMatchObject({ tool: "ls", warning: expect.stringContaining("outside the project") });
+    expect(asked[0]!.alwaysLabel).toContain(path.parse(root).root);
+    // The whole drive was allowed, so later reads anywhere on it don't ask.
+    expect(await p.check(tools.read!, { path: path.join(outsideDir, "a.txt") })).toEqual({ allow: true });
+    expect(asked).toHaveLength(1);
+    // Inside the project nothing changes.
+    expect(await p.check(tools.read!, { path: "src/a.ts" })).toEqual({ allow: true });
+    expect(asked).toHaveLength(1);
+    expect(p.describe().session[0]).toContain("outside the project");
+  });
+
+  it("refuses outside reads headless unless an allow rule covers them", async () => {
+    const elsewhere = path.resolve(root, "..", "notes").split(path.sep).join("/");
+    const p = new Permissions("default", undefined, { root, rules: { allow: [`read(${elsewhere}/**)`] } });
+    expect(await p.check(tools.read!, { path: `${elsewhere}/todo.md` })).toEqual({ allow: true });
+    expect(await p.check(tools.ls!, { path: path.resolve(root, "..", "other") })).toMatchObject({ allow: false, reason: expect.stringContaining("outside the project") });
+  });
+
+  it.runIf(process.platform === "win32")("understands Git Bash style paths", async () => {
+    const { p, asked } = perms({}, "default", "yes");
+    await p.check(tools.ls!, { path: "/c/" });
+    expect(asked[0]!.warning).toContain("C:\\");
   });
 
   it("describes its rules", () => {

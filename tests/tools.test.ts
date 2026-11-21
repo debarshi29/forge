@@ -30,8 +30,16 @@ describe("read", () => {
     expect(r.content).toContain("continue with offset 3");
   });
 
-  it("refuses paths outside the root", async () => {
-    await expect(readTool.run({ path: "../outside.txt" }, ctx)).rejects.toThrow(/outside the project root/);
+  it("refuses writes outside the root, but can read there (permissions ask first)", async () => {
+    await expect(writeTool.run({ path: "../outside.txt", content: "x" }, ctx)).rejects.toThrow(/outside the project root/);
+    const outside = path.join(path.dirname(root), `forge-outside-${Date.now()}.txt`);
+    await fs.writeFile(outside, "hello from outside\n");
+    try {
+      const r = await readTool.run({ path: outside }, ctx);
+      expect(r.content).toContain("hello from outside");
+    } finally {
+      await fs.rm(outside, { force: true });
+    }
   });
 
   it("returns images as image blocks", async () => {
