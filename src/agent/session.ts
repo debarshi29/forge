@@ -215,7 +215,7 @@ export function resumeInto(
 ): LoadedSession {
   const loaded = loadSession(info.file);
   agent.load(loaded.messages, loaded);
-  const session = new Session(root, agent.model, { id: info.id, env });
+  const session = new Session(root, agent.modelSpec, { id: info.id, env });
   if (loaded.repaired) session.message(loaded.repaired);
   agent.setRecorder(session);
   return loaded;

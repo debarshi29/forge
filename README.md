@@ -29,6 +29,22 @@ Settings are merged from `~/.forge/settings.json`, then `<project>/.forge/settin
 { "model": "anthropic:claude-opus-5-5", "effort": "high", "permissionMode": "default" }
 ```
 
+### Providers and models
+
+Pick a model with `--model provider:model` or switch mid-conversation with `/model provider:model`.
+The conversation carries over: each provider replays its own turns verbatim and skips other providers' reasoning.
+
+| Provider | Example | Credentials / setup |
+| --- | --- | --- |
+| Anthropic (default) | `anthropic:claude-opus-5-5`, `anthropic:claude-sonnet-5-5` | `ANTHROPIC_API_KEY` or `ant auth login` |
+| Google Gemini | `gemini:gemini-2.5-pro` | `GEMINI_API_KEY`, or `"gemini": {"vertexai": true, "project": "…", "location": "…"}` |
+| OpenAI | `openai:gpt-5` | `OPENAI_API_KEY`; `"openai": {"baseURL": "…"}` for other compatible endpoints |
+| Ollama | `ollama:qwen2.5-coder:3b` | a running Ollama (`OLLAMA_HOST` or `"ollama": {"baseURL": "…"}`) |
+| LM Studio | `lmstudio:<model>` | LM Studio's server on `localhost:1234` |
+
+Local models have small context windows; set `"ollama": {"contextWindow": 32768}` to match yours. Small local models
+that write tool calls as JSON text instead of using native tool calls are handled too.
+
 ### Sessions
 
 Every conversation is saved as append-only JSONL under `~/.forge/sessions/<project>-<hash>/`.

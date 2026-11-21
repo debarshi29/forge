@@ -12,7 +12,7 @@ import { buildSystemPrompt } from "./agent/systemPrompt.js";
 import { messagesToItems } from "./ui/history.js";
 import { loadConfig } from "./config/index.js";
 import { PERMISSION_MODES, Permissions, type AskFn, type PermissionMode } from "./permissions/index.js";
-import { resolveModel } from "./providers/registry.js";
+import { resolveModel, type ProviderSettings } from "./providers/registry.js";
 import { defaultTools } from "./tools/registry.js";
 import { App, type AskBridge } from "./ui/App.js";
 
@@ -47,7 +47,15 @@ const program = new Command()
     if (config.permissionMode === "bypass") {
       process.stderr.write("\x1b[33m⚠ bypass mode: every tool call runs without asking.\x1b[0m\n");
     }
-    const { provider, model } = resolveModel(config.model, { anthropic: { ...config.anthropic, effort: config.effort } });
+    const providerSettings: ProviderSettings = {
+      anthropic: { ...config.anthropic, effort: config.effort },
+      openai: config.openai,
+      gemini: config.gemini,
+      ollama: config.ollama,
+      lmstudio: config.lmstudio,
+    };
+    const resolved = resolveModel(config.model, providerSettings);
+    const { provider, model } = resolved;
 
     const headless = flags.print !== undefined;
     const tty = Boolean(process.stdin.isTTY);
@@ -71,7 +79,7 @@ const program = new Command()
     const agent = new Agent({
       provider,
       model,
-      system: buildSystemPrompt({ root, cwd: root, model: config.model, memory }),
+      system: buildSystemPrompt({ root, cwd: root, model: resolved.spec, memory }),
       tools,
       permissions: new Permissions(config.permissionMode, ask),
       root,
@@ -99,7 +107,7 @@ const program = new Command()
         ];
         if (headless && flags.output === "text") process.stderr.write(`\x1b[2m[resumed ${target.id}]\x1b[0m\n`);
       } else {
-        agent.setRecorder(new Session(root, config.model));
+        agent.setRecorder(new Session(root, resolved.spec));
         pickSession = flags.resume === true;
         if (pickSession && headless) throw new Error("--resume needs a session id in -p mode (or use --continue)");
       }
@@ -126,6 +134,10 @@ const program = new Command()
         initialItems,
         pickSession,
         memory,
+        switchModel: (spec: string) => {
+          const next = resolveModel(spec, providerSettings);
+          agent.setModel(next.provider, next.model, buildSystemPrompt({ root, cwd: root, model: next.spec, memory }));
+        },
       }),
       { exitOnCtrlC: false },
     );

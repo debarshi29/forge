@@ -11,8 +11,8 @@ import { FakeProvider, type FakeTurn } from "../src/providers/fake.js";
 import { defaultTools } from "../src/tools/registry.js";
 import { tempDir } from "./helpers.js";
 
-function makeAgent(root: string, turns: FakeTurn[], model = "anthropic:claude-opus-5-5") {
-  const provider = new FakeProvider(turns);
+function makeAgent(root: string, turns: FakeTurn[], model = "claude-opus-5-5") {
+  const provider = new FakeProvider(turns, "anthropic");
   const agent = new Agent({ provider, model, system: "t", tools: defaultTools(), permissions: new Permissions("bypass"), root });
   return { agent, provider };
 }

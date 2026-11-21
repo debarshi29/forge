@@ -20,14 +20,14 @@ const PRICES: Array<[RegExp, Price]> = [
   [/^claude-haiku-4-5/, { input: 1, output: 5, cacheRead: 0.1 }],
 ];
 
-/** Strip a "provider:" prefix. */
-function bare(model: string): string {
-  const i = model.indexOf(":");
-  return i === -1 ? model : model.slice(i + 1);
-}
-
+/**
+ * Price for "anthropic:<id>" or a bare Claude id. Other providers (and local
+ * models that happen to be named like Claude) are unpriced.
+ */
 export function priceFor(model: string): Price | undefined {
-  const id = bare(model);
+  const i = model.indexOf(":");
+  if (i !== -1 && model.slice(0, i) !== "anthropic") return undefined;
+  const id = i === -1 ? model : model.slice(i + 1);
   return PRICES.find(([re]) => re.test(id))?.[1];
 }
 
