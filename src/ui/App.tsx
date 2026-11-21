@@ -5,6 +5,17 @@ import { matchCommands, parseCommand, switchTo, type CommandContext } from "../c
 import type { ModelOption } from "../providers/catalog.js";
 import { ModelPicker } from "./ModelPicker.js";
 import { ThemePicker } from "./ThemePicker.js";
+import { Pet, type PetStatus } from "./Pet.js";
+import { PetPicker } from "./PetPicker.js";
+import type { MouseEmitter } from "./mouseStdin.js";
+import { findPet, isMouseInput, MOUSE_OFF, MOUSE_ON } from "./pets.js";
+
+/** Pet choice as saved in settings. kind "none" means no pet. */
+export interface PetSettings {
+  kind: string;
+  name?: string;
+  clicks: boolean;
+}
 import { DEFAULT_THEME, findTheme, ThemeContext, type Theme } from "./theme.js";
 import type { AskAnswer, AskFn, PermissionMode, PermissionRequest } from "../permissions/index.js";
 import { formatCost } from "../agent/cost.js";
@@ -43,6 +54,12 @@ interface Props {
   initialTheme?: Theme;
   /** Persist a theme choice (wired by the CLI). */
   saveTheme?(name: string): void;
+  /** Saved pet settings to start with. */
+  initialPet?: PetSettings;
+  /** Persist pet settings (wired by the CLI). */
+  savePet?(pet: PetSettings): void;
+  /** Mouse click events from the filtered stdin (see mouseStdin.ts). */
+  mouse?: MouseEmitter;
 }
 
 type ItemInput = Item extends infer T ? (T extends Item ? Omit<T, "id"> : never) : never;
@@ -55,7 +72,7 @@ const MODE_LABEL: Record<PermissionMode, string> = {
   bypass: "bypass permissions",
 };
 
-export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel, listModels, initialTheme = DEFAULT_THEME, saveTheme }: Props) {
+export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel, listModels, initialTheme = DEFAULT_THEME, saveTheme, initialPet, savePet, mouse }: Props) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const nextId = useRef(1);
@@ -68,6 +85,11 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
   const [theme, setThemeState] = useState<Theme>(initialTheme);
   const [previewTheme, setPreviewTheme] = useState<Theme | undefined>();
   const [pickingTheme, setPickingTheme] = useState(false);
+  const [pet, setPetState] = useState<PetSettings>(() => initialPet ?? { kind: "none", clicks: true });
+  const [pickingPet, setPickingPet] = useState(false);
+  const [petFlash, setPetFlash] = useState<{ status: PetStatus; until: number } | undefined>();
+  const pokeRef = useRef<() => void>(undefined);
+  const petKind = findPet(pet.kind);
   const [verb, setVerb] = useState(initialTheme.verbs[0]!);
   const t = previewTheme ?? theme;
   const [modelOptions, setModelOptions] = useState<ModelOption[] | undefined>();
@@ -161,6 +183,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
               break;
             case "done":
               flush();
+              flashPet(ev.stop === "end_turn" ? "done" : ev.stop === "aborted" ? "idle" : "error");
               if (ev.stop === "aborted") push({ kind: "info", text: "Interrupted.", tone: "warn" });
               else if (ev.stop === "refusal") push({ kind: "info", text: `The model declined to continue${ev.detail ? `: ${ev.detail}` : "."}`, tone: "warn" });
               else if (ev.stop === "max_tokens") push({ kind: "info", text: "Response cut off at max_tokens.", tone: "warn" });
@@ -169,6 +192,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
         }
       } catch (err) {
         flush();
+        flashPet("error");
         push({ kind: "info", text: `Error: ${err instanceof Error ? err.message : String(err)}`, tone: "error" });
       } finally {
         abortRef.current = undefined;
@@ -225,6 +249,10 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
         }
       : undefined,
     openThemePicker: () => setPickingTheme(true),
+    openPetPicker: () => setPickingPet(true),
+    pet: petKind ? { kind: petKind.label, name: pet.name ?? petKind.defaultName, clicks: pet.clicks } : undefined,
+    updatePet: (patch) => updatePet(patch),
+    pokePet: () => pokeRef.current?.(),
     setTheme: (name) => {
       const next = findTheme(name);
       if (!next) return false;
@@ -277,8 +305,13 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     abortRef.current?.abort();
   }, [pending]);
 
-  // Global keys: interrupt, mode cycling.
+  // Global keys: interrupt, mode cycling, petting.
   useInput((input, key) => {
+    if (isMouseInput(input)) return;
+    if (key.ctrl && input === "p") {
+      pokeRef.current?.();
+      return;
+    }
     if (key.tab && key.shift) {
       const cycle = allowBypass ? [...MODE_CYCLE, "bypass" as const] : MODE_CYCLE;
       setMode(cycle[(cycle.indexOf(mode) + 1) % cycle.length]!);
@@ -304,6 +337,30 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     setStaticKey((k) => k + 1);
   }
 
+  function flashPet(status: PetStatus) {
+    setPetFlash(status === "idle" ? undefined : { status, until: Date.now() + 4000 });
+  }
+
+  function updatePet(patch: Partial<PetSettings>) {
+    setPetState((prev) => {
+      const next = { ...prev, ...patch };
+      savePet?.(next);
+      return next;
+    });
+  }
+
+  // Terminal mouse reporting, only while a clickable pet is on screen.
+  const mouseOn = Boolean(petKind && pet.clicks);
+  useEffect(() => {
+    if (!mouseOn) return;
+    stdout.write(MOUSE_ON);
+    return () => {
+      stdout.write(MOUSE_OFF);
+    };
+  }, [mouseOn, stdout]);
+
+  const petStatus: PetStatus = busy ? "busy" : (petFlash?.status ?? "idle");
+
   const ctxPct = agent.lastInputTokens ? Math.round((agent.lastInputTokens / agent.contextWindow) * 100) : 0;
 
   return (
@@ -312,6 +369,10 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
       <Static key={staticKey} items={items}>
         {(item) => <ItemView key={item.id} item={item} />}
       </Static>
+
+      {petKind && (
+        <Pet kind={petKind} name={pet.name ?? petKind.defaultName} status={petStatus} statusUntil={busy ? undefined : petFlash?.until} clickable={mouseOn} mouse={mouse} pokeRef={pokeRef} />
+      )}
 
       {liveThinking && !liveText && (
         <Box marginTop={1}>
@@ -337,6 +398,24 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
             {formatElapsed(now - startedAt)} · esc to interrupt)
           </Text>
         </Box>
+      )}
+
+      {pickingPet && !busy && (
+        <PetPicker
+          current={pet.kind}
+          onCancel={() => setPickingPet(false)}
+          onPick={(kind) => {
+            setPickingPet(false);
+            if (!kind) {
+              updatePet({ kind: "none" });
+              push({ kind: "info", text: "Pet hidden. /pets to adopt one again." });
+              return;
+            }
+            const name = kind.name === pet.kind ? (pet.name ?? kind.defaultName) : kind.defaultName;
+            updatePet({ kind: kind.name, name });
+            push({ kind: "info", text: `You adopted ${name} the ${kind.label.toLowerCase()}! Click it, or press Ctrl+P to pet it.` });
+          }}
+        />
       )}
 
       {pickingTheme && !busy && (
@@ -383,7 +462,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
 
       <Box marginTop={1} flexDirection="column">
         <Input
-          active={!pending && !((sessions || pickingModel || pickingTheme) && !busy)}
+          active={!pending && !((sessions || pickingModel || pickingTheme || pickingPet) && !busy)}
           placeholder={busy ? "Working… (type /help, or Esc to interrupt)" : "Ask Forge to do something"}
           onSubmit={submit}
           onCtrlC={onCtrlC}

@@ -17,7 +17,9 @@ import { PERMISSION_MODES, Permissions, type AskFn, type PermissionMode } from "
 import { listModelOptions, resolveModelForUse } from "./providers/catalog.js";
 import type { ProviderSettings } from "./providers/registry.js";
 import { defaultTools } from "./tools/registry.js";
-import { App, type AskBridge } from "./ui/App.js";
+import { App, type AskBridge, type PetSettings } from "./ui/App.js";
+import { filterMouse } from "./ui/mouseStdin.js";
+import { MOUSE_OFF } from "./ui/pets.js";
 
 interface Flags {
   print?: string;
@@ -128,6 +130,8 @@ const program = new Command()
       process.exitCode = 2;
       return;
     }
+    // Ink drops mouse reports, so clicks for the pet are filtered out of stdin first.
+    const input = filterMouse(process.stdin);
     const app = render(
       createElement(App, {
         agent,
@@ -144,6 +148,15 @@ const program = new Command()
         },
         listModels: () => listModelOptions(providerSettings),
         initialTheme: findTheme(config.theme) ?? DEFAULT_THEME,
+        mouse: input.mouse,
+        initialPet: { kind: config.pet ?? "none", name: config.petName, clicks: config.petClicks ?? true },
+        savePet: (pet: PetSettings) => {
+          try {
+            saveUserSettings({ pet: pet.kind, ...(pet.name ? { petName: pet.name } : {}), petClicks: pet.clicks });
+          } catch {
+            // Not fatal.
+          }
+        },
         saveTheme: (name: string) => {
           try {
             saveUserSettings({ theme: name });
@@ -152,9 +165,12 @@ const program = new Command()
           }
         },
       }),
-      { exitOnCtrlC: false },
+      { exitOnCtrlC: false, stdin: input.stdin },
     );
+    // Never leave the terminal in mouse-reporting mode, however we exit.
+    process.once("exit", () => process.stdout.write(MOUSE_OFF));
     await app.waitUntilExit();
+    input.dispose();
   });
 
 /** Run one prompt; Ctrl+C aborts the turn. Returns false on error/refusal. */
