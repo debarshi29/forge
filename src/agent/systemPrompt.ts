@@ -1,5 +1,4 @@
-import { existsSync } from "node:fs";
-import path from "node:path";
+import { findRepoRoot, type MemoryFile } from "./memory.js";
 import { detectShell } from "../tools/shell.js";
 
 export interface PromptEnv {
@@ -7,6 +6,7 @@ export interface PromptEnv {
   cwd: string;
   model: string;
   date?: Date;
+  memory?: MemoryFile[];
 }
 
 const BASE = `You are Forge, a coding agent working in the user's project from their terminal. You read, edit and run code with the tools provided, and you finish the task you are given.
@@ -30,8 +30,16 @@ const BASE = `You are Forge, a coding agent working in the user's project from t
 /** Build the system prompt. Kept deterministic within a session so it caches. */
 export function buildSystemPrompt(env: PromptEnv): string {
   const shell = detectShell();
-  const isGit = findUp(env.cwd, ".git") !== undefined;
+  const isGit = findRepoRoot(env.cwd) !== undefined;
   const date = (env.date ?? new Date()).toISOString().slice(0, 10);
+  const memory = env.memory ?? [];
+  const memorySection = memory.length
+    ? `
+
+# Instructions from memory files
+The user and project wrote these. Follow them; when they conflict, the more specific (later) file wins.
+${memory.map((m) => `\n## ${m.path} (${m.scope})\n\n${m.content}`).join("\n")}`
+    : "";
   return `${BASE}
 
 # Environment
@@ -41,15 +49,5 @@ export function buildSystemPrompt(env: PromptEnv): string {
 - Platform: ${process.platform}
 - Shell used by the bash tool: ${shell.kind === "bash" ? "bash" : "Windows PowerShell 5.1 (use PowerShell syntax)"}
 - Model: ${env.model}
-- Today's date: ${date}`;
-}
-
-function findUp(start: string, name: string): string | undefined {
-  let dir = path.resolve(start);
-  while (true) {
-    if (existsSync(path.join(dir, name))) return dir;
-    const parent = path.dirname(dir);
-    if (parent === dir) return undefined;
-    dir = parent;
-  }
+- Today's date: ${date}${memorySection}`;
 }

@@ -11,6 +11,8 @@ import type {
   Usage,
 } from "../providers/types.js";
 import { toToolSpec } from "../tools/registry.js";
+import { costOf } from "./cost.js";
+import { appendUser } from "./history.js";
 import { ToolError, type Tool, type ToolContext, type ToolResult } from "../tools/types.js";
 
 export const MAX_TOOL_OUTPUT = 30_000;
@@ -34,6 +36,14 @@ export interface AgentOptions {
   cwd?: string;
   maxTokens?: number;
   messages?: Message[];
+  /** Persistence hook (sessions): sees every appended message and usage. */
+  recorder?: Recorder;
+}
+
+export interface Recorder {
+  /** Called with exactly what was appended (user content may be merged on replay). */
+  message(message: Message): void;
+  usage(model: string, usage: Usage): void;
 }
 
 export class Agent {
@@ -41,6 +51,8 @@ export class Agent {
   readonly usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   /** Input tokens of the most recent request: the current context size. */
   lastInputTokens = 0;
+  /** Session cost in USD for models with known prices. */
+  costUSD = 0;
   private readonly toolCtx: Omit<ToolContext, "signal">;
 
   constructor(private readonly opts: AgentOptions) {
@@ -61,11 +73,34 @@ export class Agent {
     return this.opts.permissions;
   }
 
+  get tools(): Tool[] {
+    return this.opts.tools;
+  }
+
+  get recorder(): Recorder | undefined {
+    return this.opts.recorder;
+  }
+
   /** Start a fresh conversation (/clear). */
   reset(): void {
     this.messages.length = 0;
     this.toolCtx.fileState.clear();
     this.lastInputTokens = 0;
+  }
+
+  /** Replace the conversation with a saved one (/resume). */
+  load(messages: Message[], totals?: { usage: Usage; costUSD: number; lastInputTokens: number }): void {
+    this.reset();
+    this.messages.push(...messages);
+    if (totals) {
+      Object.assign(this.usage, totals.usage);
+      this.costUSD = totals.costUSD;
+      this.lastInputTokens = totals.lastInputTokens;
+    }
+  }
+
+  setRecorder(recorder: Recorder | undefined): void {
+    this.opts.recorder = recorder;
   }
 
   /** Run one user prompt to completion, yielding events for the UI. */
@@ -105,6 +140,7 @@ export class Agent {
 
       this.addUsage(end.usage);
       this.messages.push(end.message); // verbatim, never edited afterwards
+      this.opts.recorder?.message(end.message);
       yield { type: "assistant_message", message: end.message, stop: end.stop, usage: end.usage };
 
       const toolUses = end.message.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
@@ -209,19 +245,14 @@ export class Agent {
     return this.findTool(call.name)?.readOnly ?? false;
   }
 
-  /** Append user content, merging into a trailing user message (keeps roles alternating). */
   private pushUser(content: Block[]): void {
-    const last = this.messages.at(-1);
-    if (last?.role === "user") {
-      // Tool results must come first in a user turn.
-      const all = [...last.content, ...content];
-      last.content = [...all.filter((b) => b.type === "tool_result"), ...all.filter((b) => b.type !== "tool_result")];
-    } else {
-      this.messages.push({ role: "user", content });
-    }
+    appendUser(this.messages, content);
+    this.opts.recorder?.message({ role: "user", content });
   }
 
   private addUsage(u: Usage): void {
+    this.costUSD += costOf(this.opts.model, u) ?? 0;
+    this.opts.recorder?.usage(this.opts.model, u);
     this.usage.inputTokens += u.inputTokens;
     this.usage.outputTokens += u.outputTokens;
     this.usage.cacheReadTokens = (this.usage.cacheReadTokens ?? 0) + (u.cacheReadTokens ?? 0);
