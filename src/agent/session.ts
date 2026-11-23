@@ -10,8 +10,8 @@ import type { Todo } from "../tools/todo.js";
 
 type Record =
   | { t: "meta"; v: 1; id: string; root: string; model: string; created: string }
-  | { t: "msg"; m: Message }
-  | { t: "usage"; model: string; u: Usage; side?: true }
+  | { t: "msg"; m: Message; at?: number }
+  | { t: "usage"; model: string; u: Usage; side?: true; at?: number }
   /** History was compacted: from here on the conversation is `m`. */
   | { t: "compact"; m: Message[] }
   | { t: "todos"; todos: Todo[] };
@@ -80,12 +80,12 @@ export class Session implements Recorder {
   }
 
   message(m: Message): void {
-    this.write({ t: "msg", m });
+    this.write({ t: "msg", m, at: Date.now() });
   }
 
   usage(model: string, u: Usage, side?: boolean): void {
     this.model = model;
-    this.write({ t: "usage", model, u, ...(side ? { side: true as const } : {}) });
+    this.write({ t: "usage", model, u, ...(side ? { side: true as const } : {}), at: Date.now() });
   }
 
   compact(m: Message[]): void {

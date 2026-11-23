@@ -6,9 +6,13 @@ import { formatTokens } from "../ui/format.js";
 import { THEMES } from "../ui/theme.js";
 import { contextBreakdown, formatContext } from "../agent/context.js";
 import { formatTodos } from "../tools/todo.js";
+import { readHistory, statsReport, usageReport } from "../agent/stats.js";
 
 export interface CommandContext {
   agent: Agent;
+  /** Project root (for /usage project). */
+  root?: string;
+  env?: NodeJS.ProcessEnv;
   print(text: string, tone?: "info" | "warn" | "error"): void;
   clearTranscript(): void;
   /** Point persistence at a fresh session file (no-op when sessions are off). */
@@ -238,6 +242,27 @@ export const COMMANDS: SlashCommand[] = [
       const specs = args.split(/\s+/).filter(Boolean);
       ctx.print(`Benchmarking ${specs.length ? specs.join(", ") : "the installed Ollama models"} on 5 tasks, each in a throwaway folder. This takes a few minutes; Esc stops it.`);
       await ctx.bench(specs);
+    },
+  },
+  {
+    name: "usage",
+    args: "[project]",
+    description: "Tokens and cost: this session, today, this week and month, by model and by day",
+    run(args, ctx) {
+      const projectOnly = args.trim() === "project";
+      const h = readHistory(ctx.env, projectOnly ? { root: ctx.root } : {});
+      const id = ctx.agent.recorder && "id" in ctx.agent.recorder ? String((ctx.agent.recorder as { id: unknown }).id) : undefined;
+      const scope = projectOnly ? "this project" : "all projects (/usage project for just this one)";
+      ctx.print(`Usage across ${scope}:\n\n${usageReport(h, id ? { session: { id, label: "This session" } } : {})}`);
+    },
+  },
+  {
+    name: "stats",
+    args: "[project]",
+    description: "Activity: sessions per day, tools, files, turns per prompt, hours you work",
+    run(args, ctx) {
+      const projectOnly = args.trim() === "project";
+      ctx.print(statsReport(readHistory(ctx.env, projectOnly ? { root: ctx.root } : {})));
     },
   },
   {

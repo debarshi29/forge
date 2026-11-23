@@ -20,6 +20,7 @@ import { planAutoContext, stepDown } from "./providers/ollamaFit.js";
 import type { Provider } from "./providers/types.js";
 import { formatBench, runBench } from "./bench/index.js";
 import { loadAgentTypes } from "./agent/subagents.js";
+import { makeStatusLine } from "./agent/statusLine.js";
 import { makeTaskTool } from "./tools/task.js";
 import type { ProviderSettings } from "./providers/registry.js";
 import { defaultTools } from "./tools/registry.js";
@@ -195,6 +196,7 @@ const program = new Command()
           return next.warning ? { warning: next.warning } : undefined;
         },
         listModels: () => listModelOptions(providerSettings),
+        ...(config.statusLine ? { statusLine: makeStatusLine(config.statusLine, root) } : {}),
         setContextLength: async (requested: number | "auto" | undefined, progress?: (text: string) => void) => {
           if (!agent.modelSpec.startsWith("ollama:")) {
             throw new Error("The context size can only be changed for Ollama models; cloud models have a fixed window.");

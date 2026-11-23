@@ -29,6 +29,7 @@ import { SessionPicker } from "./SessionPicker.js";
 import { Input, type Suggestion } from "./Input.js";
 import { PermissionDialog } from "./PermissionDialog.js";
 import { ItemView, ToolCard, type Item } from "./Transcript.js";
+import type { StatusState } from "../agent/statusLine.js";
 
 /** Lets the Permissions object (created before render) ask through the UI. */
 export interface AskBridge {
@@ -54,6 +55,8 @@ interface Props {
   listModels?(): Promise<ModelOption[]>;
   /** /context <size>: run the current Ollama model with this context (wired by the CLI). */
   setContextLength?(tokens: number | "auto" | undefined, progress?: (text: string) => void): Promise<{ text: string; tone?: "info" | "warn" }>;
+  /** Custom status line under the prompt (settings "statusLine", wired by the CLI). */
+  statusLine?(state: StatusState): Promise<string>;
   /** /bench: score models on fixed tasks; returns the results table (wired by the CLI). */
   bench?(specs: string[], progress: (text: string) => void, signal: AbortSignal): Promise<string>;
   /** Theme to start with. */
@@ -78,7 +81,7 @@ const MODE_LABEL: Record<PermissionMode, string> = {
   bypass: "bypass permissions",
 };
 
-export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel, listModels, setContextLength, bench, initialTheme = DEFAULT_THEME, saveTheme, initialPet, savePet, mouse }: Props) {
+export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel, listModels, setContextLength, bench, statusLine, initialTheme = DEFAULT_THEME, saveTheme, initialPet, savePet, mouse }: Props) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const nextId = useRef(1);
@@ -104,6 +107,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
   const [liveThinking, setLiveThinking] = useState("");
   const [running, setRunning] = useState<Array<{ id: string; name: string; summary: string; progress?: string }>>([]);
   const busyRef = useRef(false);
+  const [statusText, setStatusText] = useState("");
   const [busy, setBusy] = useState(false);
   const [todos, setTodos] = useState<Todo[]>(agent.todos);
   const [showTasks, setShowTasks] = useState(true);
@@ -258,6 +262,26 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     },
     [agent, flush, push],
   );
+  // The custom status line refreshes whenever a turn ends or the mode or model changes.
+  useEffect(() => {
+    if (!statusLine || busy) return;
+    let live = true;
+    const recorder = agent.recorder as { id?: string } | undefined;
+    statusLine({
+      ...(recorder?.id ? { session_id: recorder.id } : {}),
+      cwd: root,
+      model: agent.modelSpec,
+      permission_mode: mode,
+      context: { tokens: agent.contextTokens, window: agent.contextWindow, percent: Math.round((agent.contextTokens / agent.contextWindow) * 100) },
+      cost_usd: agent.costUSD,
+      tokens: { input: agent.usage.inputTokens, output: agent.usage.outputTokens },
+    })
+      .then((text) => live && setStatusText(text))
+      .catch((err: unknown) => live && setStatusText(`status line: ${err instanceof Error ? err.message : String(err)}`));
+    return () => {
+      live = false;
+    };
+  }, [statusLine, busy, mode, agent, agent.modelSpec, root]);
   // Continue the conversation with finished background agents' reports.
   const resumeRef = useRef<(() => void) | undefined>(undefined);
   resumeRef.current = () => {
@@ -336,6 +360,8 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     },
     themeName: theme.name,
     print: (text, tone) => push({ kind: "info", text, tone }),
+    root,
+    env,
     clearTranscript: () => {
       setTodos([]);
       resetTranscript();
@@ -593,6 +619,11 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
             {formatCost(agent.costUSD)}
           </Text>
         </Box>
+        {statusText ? (
+          <Box paddingX={1}>
+            <Text>{statusText}</Text>
+          </Box>
+        ) : null}
       </Box>
     </Box>
     </ThemeContext.Provider>

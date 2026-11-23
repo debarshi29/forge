@@ -93,6 +93,18 @@ async function mount(
   return { root, agent, stdout, type, send };
 }
 
+describe("TUI status line", () => {
+  it("renders the custom status line and refreshes it after a turn", async () => {
+    let calls = 0;
+    const { stdout, type } = await mount([{ text: "done" }], "default", {
+      extra: { statusLine: async (s) => `⎇ main · ${s.model} · run ${++calls}` },
+    });
+    await until(() => stdout.text().includes("⎇ main · fake:fake · run 1"));
+    await type("hi\r");
+    await until(() => stdout.text().includes("run 2"));
+  });
+});
+
 describe("TUI subagents", () => {
   it("shows a background agent finishing and carries on with its report", async () => {
     const helper = new FakeProvider([{ toolCalls: [{ name: "ls", input: {} }] }, { text: "found 3 files", delayMs: 80 }], "helper");
