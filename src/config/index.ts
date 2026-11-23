@@ -44,6 +44,8 @@ const SettingsSchema = z
     diagnostics: z.union([z.boolean(), z.object({ command: z.string().min(1), timeout: z.number().positive() }).partial()]),
     /** Re-ask local models for malformed tool arguments with schema-constrained output (default true). */
     repairToolCalls: z.boolean(),
+    /** Session limits: cost (USD), tokens, and model requests per prompt. */
+    budget: z.object({ costUSD: z.number().positive(), tokens: z.number().int().positive(), requestsPerPrompt: z.number().int().positive() }).partial(),
     /** A command whose stdout is shown under the prompt; it gets the session state as JSON on stdin. */
     statusLine: z.object({ command: z.string().min(1), timeout: z.number().positive().optional() }),
     theme: z.string(),
@@ -88,6 +90,7 @@ export interface Config {
   diagnostics: false | { command?: string; timeout?: number };
   repairToolCalls: boolean;
   statusLine?: { command: string; timeout?: number };
+  budget?: { costUSD?: number; tokens?: number; requestsPerPrompt?: number };
   theme?: string;
   pet?: string;
   petName?: string;
@@ -173,6 +176,7 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
     diagnostics: merged.diagnostics === false ? false : typeof merged.diagnostics === "object" ? merged.diagnostics : {},
     repairToolCalls: merged.repairToolCalls ?? true,
     ...(merged.statusLine ? { statusLine: merged.statusLine } : {}),
+    ...(merged.budget && Object.keys(merged.budget).length ? { budget: merged.budget } : {}),
     theme: merged.theme,
     pet: merged.pet,
     petName: merged.petName,

@@ -93,6 +93,26 @@ async function mount(
   return { root, agent, stdout, type, send };
 }
 
+describe("TUI loops and goals", () => {
+  it("runs a loop's prompt right away, lists it, and stops it", async () => {
+    const { stdout, type } = await mount([{ text: "CI is green" }]);
+    await type("/loop 10m check CI\r");
+    await until(() => stdout.text().includes("CI is green"));
+    expect(stdout.text()).toContain("Started loop-1: every 10m");
+    await type("/loop\r");
+    await until(() => stdout.text().includes("loop-1  every 10m  (1 run)  check CI"));
+    await type("/loop stop\r");
+    await until(() => stdout.text().includes("Stopped loop-1."));
+  });
+
+  it("works on a /goal until the model says it is complete", async () => {
+    const { stdout, type } = await mount([{ text: "step one" }, { text: "All verified.\nGOAL COMPLETE" }], "bypass");
+    await type("/goal tidy the readme\r");
+    await until(() => stdout.text().includes("Goal met (after 2 rounds)."));
+    expect(stdout.text()).toContain("◎ Goal: tidy the readme");
+  });
+});
+
 describe("TUI status line", () => {
   it("renders the custom status line and refreshes it after a turn", async () => {
     let calls = 0;
