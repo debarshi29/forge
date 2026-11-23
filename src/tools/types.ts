@@ -25,6 +25,19 @@ export interface ToolContext {
   approvePlan?(plan: string): Promise<PlanDecision>;
   /** The agent's task list, updated by todo_write. */
   todos?: { items: Todo[] };
+  /** Id of the tool call being run. */
+  toolUseId?: string;
+  /** Report what a long-running tool is doing (shown under its card). */
+  progress?(text: string): void;
+  /** Run a subagent (the task tool). */
+  runSubagent?(req: SubagentRequest, ctx: ToolContext): Promise<ToolResult>;
+}
+
+export interface SubagentRequest {
+  type: string;
+  description: string;
+  prompt: string;
+  background: boolean;
 }
 
 export interface Tool<S extends z.ZodType = z.ZodType> {

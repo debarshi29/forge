@@ -1,3 +1,5 @@
+import { BUILTIN_AGENTS, type AgentType } from "../src/agent/subagents.js";
+import { makeTaskTool } from "../src/tools/task.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -50,7 +52,11 @@ async function until(fn: () => boolean, ms = 3000) {
 let cleanup: (() => void) | undefined;
 afterEach(() => cleanup?.());
 
-async function mount(turns: FakeTurn[], mode: PermissionMode = "default", opts: { root?: string; env?: NodeJS.ProcessEnv; extra?: Partial<AppProps> } = {}) {
+async function mount(
+  turns: FakeTurn[],
+  mode: PermissionMode = "default",
+  opts: { root?: string; env?: NodeJS.ProcessEnv; extra?: Partial<AppProps>; agent?: Partial<ConstructorParameters<typeof Agent>[0]> } = {},
+) {
   const root = opts.root ?? (await tempDir());
   const bridge: AskBridge = {};
   const agent = new Agent({
@@ -60,6 +66,7 @@ async function mount(turns: FakeTurn[], mode: PermissionMode = "default", opts: 
     tools: defaultTools(),
     permissions: new Permissions(mode, (req) => bridge.ask!(req)),
     root,
+    ...opts.agent,
   });
   const stdout = new FakeStdout();
   const stdin = fakeStdin();
@@ -85,6 +92,27 @@ async function mount(turns: FakeTurn[], mode: PermissionMode = "default", opts: 
   };
   return { root, agent, stdout, type, send };
 }
+
+describe("TUI subagents", () => {
+  it("shows a background agent finishing and carries on with its report", async () => {
+    const helper = new FakeProvider([{ toolCalls: [{ name: "ls", input: {} }] }, { text: "found 3 files", delayMs: 80 }], "helper");
+    const types: AgentType[] = [...BUILTIN_AGENTS, { name: "bg", description: "x", tools: "readonly", model: "helper:m", prompt: "p", source: "test" }];
+    const { stdout, type, agent } = await mount(
+      [
+        { toolCalls: [{ name: "task", input: { description: "count files", prompt: "count", subagent_type: "bg", run_in_background: true } }] },
+        { text: "Started; I'll report back." },
+        { text: "The helper found 3 files." },
+      ],
+      "bypass",
+      { agent: { tools: [...defaultTools(), makeTaskTool(types)], agentTypes: types, resolveModel: async () => ({ provider: helper, model: "m" }) } },
+    );
+    await type("count the files\r");
+    await until(() => stdout.text().includes("Started; I'll report back."));
+    await until(() => stdout.text().includes("Background agent agent-1 (count files) finished"));
+    await until(() => stdout.text().includes("The helper found 3 files."));
+    expect(agent.pendingNotes).toBe(0);
+  });
+});
 
 describe("TUI", () => {
   it("streams an answer for a submitted prompt", async () => {

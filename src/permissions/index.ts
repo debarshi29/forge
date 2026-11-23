@@ -185,7 +185,8 @@ export class Permissions {
         reason: "This is a non-interactive run, so no one can approve the plan. Stop here: present the plan as your final answer.",
       };
     }
-    const answer = await this.ask({ tool: "exit_plan_mode", input: { plan }, summary: plan, kind: "plan" });
+    const ask = this.ask;
+    const answer = await this.serial(() => ask({ tool: "exit_plan_mode", input: { plan }, summary: plan, kind: "plan" }));
     if (answer.kind === "no") {
       return {
         approved: false,
@@ -200,6 +201,15 @@ export class Permissions {
     return { approved: true, mode };
   }
 
+  private queue: Promise<unknown> = Promise.resolve();
+
+  /** Run prompts to the user one after another. */
+  private serial<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.queue.then(fn, fn);
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
   private async askUser(
     tool: string,
     input: unknown,
@@ -207,8 +217,13 @@ export class Permissions {
     extra: Partial<PermissionRequest> & { alwaysKey?: string },
   ): Promise<Decision> {
     const { alwaysKey, ...req } = extra;
-    const answer = await this.ask!({ tool, input, summary, kind: "tool", ...req });
-    if (answer.kind === "always" && extra.allowAlways !== false) this.sessionAllow.add(alwaysKey ?? sessionKey(tool, summary));
+    const key = alwaysKey ?? sessionKey(tool, summary);
+    // One question at a time (parallel subagents may ask together); an
+    // "always" given while this one waited counts for it too.
+    const answer = await this.serial(async (): Promise<AskAnswer> =>
+      extra.allowAlways !== false && this.sessionAllow.has(key) ? { kind: "yes" } : this.ask!({ tool, input, summary, kind: "tool", ...req }),
+    );
+    if (answer.kind === "always" && extra.allowAlways !== false) this.sessionAllow.add(key);
     if (answer.kind === "no") {
       return { allow: false, reason: answer.reason ? `The user denied this: ${answer.reason}` : "The user denied this tool call." };
     }

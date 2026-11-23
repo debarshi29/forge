@@ -4,7 +4,7 @@ A from-scratch terminal coding agent in the spirit of Claude Code and Codex CLI:
 
 - **Provider-agnostic:** Anthropic Claude (first-class), Google Gemini, OpenAI, and Ollama / OpenAI-compatible local models.
 - **Built in TypeScript** on Node 22+.
-- **Features:** Ink TUI, permission modes and plan mode, hooks, sessions and resume, context compaction, task lists, and help for small local models (tool-call repair, repo map, checks after edits, `/bench`). Planned: subagents, MCP client.
+- **Features:** Ink TUI, permission modes and plan mode, hooks, sessions and resume, context compaction, task lists, subagents (parallel and background, custom types), and help for small local models (tool-call repair, repo map, checks after edits, `/bench`). Planned: MCP client.
 
 > Status: early development. See [PLAN.md](PLAN.md) for the architecture and milestones.
 
@@ -109,6 +109,40 @@ time and output speed. With no arguments it runs every installed Ollama model th
 - **`/context`** shows what fills the window: system prompt, memory files, tool definitions, messages and tool results.
 - **Tasks.** For multi-step work Forge keeps a task list (the `todo_write` tool), shown live above the prompt. Ctrl+T
   hides or shows it; `/todos` prints it. The list survives compaction and `--resume`.
+
+### Subagents
+
+Forge can hand a self-contained job to a subagent with the `task` tool. The subagent starts with a fresh context, does
+the work with its own tools, and only its final report comes back, so broad searches don't fill the main
+conversation. Several task calls in one reply run in parallel, and each shows its latest step under its card.
+
+| Type | Tools | For |
+|---|---|---|
+| `explore` | read-only | finding where things are and how they work |
+| `plan` | read-only | a step-by-step implementation plan |
+| `general` | all (still permission-checked) | multi-step work: edits, commands |
+
+With `run_in_background: true` the model carries on while the subagent works. When it finishes you see a notice, and
+Forge passes its report to the model (if Forge is idle, it starts a turn to do that). `/agents` lists the types and
+the background agents, and `/agents stop <id>` stops one. In `-p` mode, Forge waits for background agents before
+exiting.
+
+Add your own types as Markdown files in `~/.forge/agents/` or `<project>/.forge/agents/` (a project file overrides a
+user file or built-in with the same name):
+
+```markdown
+---
+name: reviewer
+description: Reviews a diff for bugs and missing tests
+tools: read, grep, glob, bash
+model: fast
+---
+You review code changes. Run git diff, read what changed, and report bugs, risky changes and missing tests as a list.
+```
+
+`tools` is a list of tool names, `readonly`, or `all`; `model` is `inherit` (the default), `fast` (the
+`models.fast` model), or a `provider:model` spec. A subagent never gets `task` itself, and in plan mode its edits
+are refused like the main agent's.
 
 ### Sessions
 
