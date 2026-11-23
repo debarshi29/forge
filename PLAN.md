@@ -129,7 +129,11 @@ Next:
     - Optional git-ref checkpoints; "always allow" can be saved to settings.
 12. **Git and GitHub workflows**: `/commit` (message from the diff), `/pr`, `/review [pr]`, `/security-review`, watch CI after push and fix failures.
 13. **Extensibility**: MCP client (`mcpServers`, stdio/HTTP, `mcp__server__tool`, `/mcp`), `web_fetch`, `web_search` (where a provider offers it), custom slash commands (`.forge/commands/*.md`), skills, `/init` (write a starter AGENTS.md), plugins bundling commands/agents/hooks/MCP.
-14. **Code intelligence**: LSP tools (definition, references, rename, diagnostics), test-runner detection and run→read→fix loops.
+14. **Code intelligence, documents and artifacts**
+   - LSP tools (definition, references, rename, diagnostics), test-runner detection and run→read→fix loops.
+   - Reading office documents: `read` extracts text from `.docx` (paragraphs, headings, tables), `.xlsx` (sheets as tables), `.pptx` (slide text and notes) and `.pdf`, instead of refusing them as binary. `.doc`/`.xls`/`.ppt` go through LibreOffice (`soffice --convert-to`) when it is installed.
+   - Editing `.docx` while keeping its formatting: a `docx_edit` tool that replaces text inside `word/document.xml`, matching across the formatting runs Word splits sentences into; later, inserting or deleting paragraphs.
+   - Artifact generation: tools to create `.docx`, `.xlsx`, `.pptx` and `.pdf` files, plus standalone HTML pages (reports, diagrams, charts), from content the model writes as Markdown/JSON. Generated files are checked by reading them back, and a `/open <file>` command opens one in its default app.
 15. **Memory and learning**: auto-memory of preferences and corrections (editable files, recalled by relevance), `/remember <note>`.
 16. **Safety**: sandboxed bash (no network / project-only), secret redaction in tool output, audit log, per-session cost/token caps.
 17. **Input and UX**: `@file` autocomplete, image paste, output styles, Ctrl+O expand tool output, Ctrl+R prompt search, vim mode, syntax highlighting, per-hunk edit approval, desktop notifications, keybindings file, session tabs, `/config`, `/doctor`, `/export`.
