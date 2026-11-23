@@ -433,6 +433,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
         }
       : undefined,
     runGoal: (goal) => runStream((signal) => runGoal(agent, root, goal, signal)),
+    sendPrompt: (p) => runStream((signal) => agent.send(p, signal)),
     loops: {
       start: (everyMs, prompt) => {
         const id = `loop-${++loopCounter.current}`;

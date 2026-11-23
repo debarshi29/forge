@@ -157,6 +157,21 @@ forge --no-session        # don't save this one
 
 `/cost` shows tokens and estimated cost (Anthropic list prices, including cache reads and writes).
 
+### Git and GitHub
+
+These commands gather the git context (status, diffs, recent commit style) and hand Forge a focused task; its tool
+calls still go through permissions. `gh` must be installed and signed in for the GitHub ones.
+
+| Command | What it does |
+|---|---|
+| `/commit [hint]` | stages what belongs to the change (never secrets), writes a message in the repo's style, commits (no push, no amend, never skips hooks) |
+| `/pr [base]` | pushes the branch and opens a pull request with a summary and testing notes, then prints its URL |
+| `/review [pr]` | reviews a PR (by number) or this branch's changes plus uncommitted ones for bugs, read-only, findings by severity with path:line |
+| `/security-review [pr]` | the same, looking for vulnerabilities (injection, missing auth checks, secrets, SSRF, XSS, …) |
+| `/ci` | a goal: watches `gh pr checks`, and on failure gives Forge the failing job's log to fix, commit and push, until CI passes (5 rounds) |
+
+Slash commands also work headless: `forge -p "/review"`, `forge -p "/commit"`, `forge -p "/usage"`.
+
 ### Checkpoints, rewind and branches
 
 Every prompt you send is a checkpoint. Before `write` or `edit` changes a file, Forge keeps its old contents (once per
