@@ -21,6 +21,7 @@ import { diagnosticsNote, runDiagnostics, type DiagnosticsOptions } from "./diag
 import { repairToolInput } from "./repair.js";
 import { canonicalToolName } from "../providers/toolNames.js";
 import { BUILTIN_AGENTS, subagentSystem, toolsFor, type AgentType } from "./subagents.js";
+import { Checkpoints, type RestoreResult } from "./checkpoints.js";
 import type { SubagentRequest } from "../tools/types.js";
 import { appendUser } from "./history.js";
 import { ToolError, type Tool, type ToolContext, type ToolResult } from "../tools/types.js";
@@ -100,6 +101,10 @@ export interface AgentOptions {
   diagnostics?: false | DiagnosticsOptions;
   /** Limits: session cost and tokens, and model requests per prompt. */
   budget?: Budget;
+  /** Share a checkpoint store (subagents use their parent's). */
+  checkpoints?: Checkpoints;
+  /** A subagent: its prompts don't start checkpoints of their own. */
+  subagent?: boolean;
   /** Subagent types the task tool can start (default: the built-in ones). */
   agentTypes?: AgentType[];
   /** Resolve a "provider:model" spec for subagents with their own model. */
@@ -119,6 +124,8 @@ export interface Recorder {
   compact?(messages: Message[]): void;
   /** The task list changed. */
   todos?(todos: Todo[]): void;
+  /** The history was replaced for another reason (/rewind). */
+  history?(messages: Message[], reason: "rewind" | "fork"): void;
 }
 
 export class Agent {
@@ -134,6 +141,8 @@ export class Agent {
   /** messages.length when lastInputTokens was measured. */
   private measuredAt = 0;
   private readonly todoState: { items: Todo[] } = { items: [] };
+  /** File snapshots per prompt, for /rewind. */
+  readonly checkpoints: Checkpoints;
   private readonly bg = new Map<string, BackgroundTask>();
   private bgCounter = 0;
   /** Reminders for the model (finished background agents), sent with the next request. */
@@ -142,6 +151,7 @@ export class Agent {
 
   constructor(private opts: AgentOptions) {
     this.messages = opts.messages ?? [];
+    this.checkpoints = opts.checkpoints ?? new Checkpoints();
     const cwd = opts.cwd ?? opts.root;
     this.toolCtx = {
       root: opts.root,
@@ -152,6 +162,7 @@ export class Agent {
       todos: this.todoState,
       runSubagent: (req, ctx) => this.runSubagent(req, ctx),
       startBackground: (job) => this.startBackground(job),
+      checkpoint: { before: (abs) => this.checkpoints.before(abs), after: (abs, mtime) => this.checkpoints.after(abs, mtime) },
     };
   }
 
@@ -220,6 +231,9 @@ export class Agent {
       ...(this.opts.diagnostics !== undefined ? { diagnostics: this.opts.diagnostics } : {}),
       ...(this.opts.repairToolCalls !== undefined ? { repairToolCalls: this.opts.repairToolCalls } : {}),
       ...(this.opts.nudgeStalls !== undefined ? { nudgeStalls: this.opts.nudgeStalls } : {}),
+      // Its edits go into this session's checkpoints, so /rewind covers them.
+      checkpoints: this.checkpoints,
+      subagent: true,
       // Its requests count toward this session's usage, as side requests.
       recorder: { message() {}, usage: (spec, u) => this.opts.recorder?.usage(spec, u, true) },
     });
@@ -393,6 +407,36 @@ export class Agent {
     this.measuredAt = 0;
     this.lastPromptMode = undefined;
     this.todoState.items = [];
+    this.checkpoints.clear();
+  }
+
+  /**
+   * Go back to before prompt n: the conversation ("chat"), the files Forge
+   * changed since ("code"), or both. Files changed outside Forge since it
+   * wrote them are only overwritten with force; otherwise they are returned
+   * in needsForce and nothing changes.
+   */
+  async rewind(n: number, what: "both" | "chat" | "code", opts: { force?: boolean } = {}): Promise<{ prompt: string; code?: RestoreResult; needsForce?: string[] }> {
+    const cp = this.checkpoints.get(n);
+    if (!cp) throw new Error(`No checkpoint ${n}; /rewind lists them.`);
+    let code: RestoreResult | undefined;
+    if (what !== "chat") {
+      const plan = await this.checkpoints.plan(n);
+      if (plan.changedOutside.length && !opts.force) return { prompt: cp.prompt, needsForce: plan.changedOutside };
+      code = await this.checkpoints.restore(plan);
+    }
+    if (what !== "code") {
+      this.messages.length = Math.min(this.messages.length, cp.messageIndex);
+      this.toolCtx.fileState.clear();
+      this.lastInputTokens = 0;
+      this.measuredAt = 0;
+      this.checkpoints.truncate(n);
+      this.opts.recorder?.history?.(this.messages, "rewind");
+    } else {
+      // The files the model read may have changed under it.
+      this.toolCtx.fileState.clear();
+    }
+    return { prompt: cp.prompt, ...(code ? { code } : {}) };
   }
 
   /** Replace the conversation with a saved one (/resume). */
@@ -487,6 +531,9 @@ export class Agent {
       }
       for (const c of o.context) extra.push(reminder(`A UserPromptSubmit hook added this context:\n${c}`));
     }
+    // Each prompt you type starts a checkpoint (an empty one just delivers background results).
+    const typed = blocks.flatMap((b) => (b.type === "text" && !isReminder(b.text) ? [b.text] : [])).join("\n").trim();
+    if (typed && !this.opts.subagent) this.checkpoints.begin(typed, this.messages.at(-1)?.role === "user" ? this.messages.length - 1 : this.messages.length);
     const mode = this.opts.permissions.mode;
     if (mode === "plan") extra.push(reminder(PLAN_REMINDER));
     else if (this.lastPromptMode === "plan") extra.push(reminder(PLAN_ENDED));

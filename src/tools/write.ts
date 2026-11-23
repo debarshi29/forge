@@ -23,6 +23,7 @@ export const writeTool = defineTool({
     const shown = displayPath(ctx.root, abs);
     const existed = (await checkFresh(ctx, abs, shown)) !== undefined;
     const before = existed ? await fs.readFile(abs, "utf8") : "";
+    await ctx.checkpoint?.before(abs);
     await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.writeFile(abs, input.content, "utf8");
     await recordWrite(ctx, abs);

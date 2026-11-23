@@ -9,7 +9,8 @@ import type { Agent, Recorder } from "./loop.js";
 import type { Todo } from "../tools/todo.js";
 
 type Record =
-  | { t: "meta"; v: 1; id: string; root: string; model: string; created: string }
+  | { t: "meta"; v: 1; id: string; root: string; model: string; created: string; parent?: string }
+  | { t: "history"; m: Message[]; reason: "rewind" | "fork" }
   | { t: "msg"; m: Message; at?: number }
   | { t: "usage"; model: string; u: Usage; side?: true; at?: number }
   /** History was compacted: from here on the conversation is `m`. */
@@ -21,6 +22,8 @@ export interface SessionInfo {
   file: string;
   created: Date;
   updated: Date;
+  /** Forked from this session. */
+  parent?: string;
   model: string;
   /** First user prompt, for pickers. */
   title: string;
@@ -59,14 +62,17 @@ function newId(): string {
 export class Session implements Recorder {
   readonly id: string;
   readonly file: string;
+  /** The session this one was forked from. */
+  readonly parent: string | undefined;
   private started = false;
 
   constructor(
     private readonly root: string,
     private model: string,
-    opts: { id?: string; env?: NodeJS.ProcessEnv } = {},
+    opts: { id?: string; env?: NodeJS.ProcessEnv; parent?: string } = {},
   ) {
     this.id = opts.id ?? newId();
+    this.parent = opts.parent;
     this.file = path.join(projectDir(root, opts.env), `${this.id}.jsonl`);
     // Resuming an existing file: keep appending to it. A crash can leave a
     // torn last line without "\n"; terminate it so new records stay parseable.
@@ -96,10 +102,14 @@ export class Session implements Recorder {
     this.write({ t: "todos", todos });
   }
 
+  history(m: Message[], reason: "rewind" | "fork"): void {
+    this.write({ t: "history", m, reason });
+  }
+
   private write(rec: Record): void {
     if (!this.started) {
       mkdirSync(path.dirname(this.file), { recursive: true });
-      const meta: Record = { t: "meta", v: 1, id: this.id, root: this.root, model: this.model, created: new Date().toISOString() };
+      const meta: Record = { t: "meta", v: 1, id: this.id, root: this.root, model: this.model, created: new Date().toISOString(), ...(this.parent ? { parent: this.parent } : {}) };
       appendFileSync(this.file, JSON.stringify(meta) + "\n");
       this.started = true;
     }
@@ -170,11 +180,17 @@ export function loadSession(file: string): LoadedSession {
       else messages.push(rec.m);
     } else if (rec.t === "compact") {
       // Keep the first prompt as the title even after the history is replaced.
-      title ??= titleOf(messages);
+      if (messages.length) title ??= titleOf(messages);
       messages.length = 0;
       messages.push(...structuredClone(rec.m));
       lastInputTokens = 0;
       compactions++;
+    } else if (rec.t === "history") {
+      // A fork starts with its history: there is no earlier title to keep.
+      if (messages.length) title ??= titleOf(messages);
+      messages.length = 0;
+      messages.push(...structuredClone(rec.m));
+      lastInputTokens = 0;
     } else if (rec.t === "todos") {
       todos = rec.todos;
     } else if (rec.t === "usage") {
@@ -200,6 +216,7 @@ export function loadSession(file: string): LoadedSession {
       model,
       title: title ?? titleOf(messages),
       messages: messages.length,
+      ...(meta?.parent ? { parent: meta.parent } : {}),
     },
     messages,
     usage,

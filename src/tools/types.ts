@@ -25,6 +25,8 @@ export interface ToolContext {
   approvePlan?(plan: string): Promise<PlanDecision>;
   /** The agent's task list, updated by todo_write. */
   todos?: { items: Todo[] };
+  /** Checkpoints: called before a file is changed and after Forge wrote it. */
+  checkpoint?: { before(abs: string): Promise<void>; after(abs: string, mtime: number): void };
   /** Id of the tool call being run. */
   toolUseId?: string;
   /** Report what a long-running tool is doing (shown under its card). */

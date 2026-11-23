@@ -2,7 +2,7 @@ import path from "node:path";
 import { isInside, normalizeInputPath } from "../tools/paths.js";
 import type { Tool } from "../tools/types.js";
 import { dangerReason } from "./danger.js";
-import { hasShellTricks, parseRules, ruleMatches, splitCommand, type ParsedRules, type Rule, type RuleSet } from "./rules.js";
+import { hasShellTricks, parseRule, parseRules, ruleMatches, splitCommand, type ParsedRules, type Rule, type RuleSet } from "./rules.js";
 
 export type PermissionMode = "default" | "acceptEdits" | "plan" | "bypass";
 export const PERMISSION_MODES: PermissionMode[] = ["default", "acceptEdits", "plan", "bypass"];
@@ -22,13 +22,15 @@ export interface PermissionRequest {
   allowAlways?: boolean;
   /** Replaces the "don't ask again" label (e.g. for a directory outside the project). */
   alwaysLabel?: string;
+  /** An allow rule the user can save to the project's settings instead of being asked again. */
+  saveRule?: string;
 }
 
 /**
  * For tool calls: yes / yes and don't ask again / no.
  * For plans: "always" = approve and auto-accept edits, "yes" = approve and keep asking.
  */
-export type AskAnswer = { kind: "yes" } | { kind: "always" } | { kind: "no"; reason?: string };
+export type AskAnswer = { kind: "yes" } | { kind: "always" } | { kind: "save" } | { kind: "no"; reason?: string };
 export type AskFn = (req: PermissionRequest) => Promise<AskAnswer>;
 
 export type Decision = { allow: true } | { allow: false; reason: string };
@@ -44,6 +46,8 @@ export interface PermissionsOptions {
   rules?: RuleSet;
   /** Project root, for path rules. */
   root?: string;
+  /** Persist an allow rule chosen in a prompt ("always allow in this project"). */
+  saveRule?(rule: string): void;
 }
 
 /**
@@ -62,6 +66,7 @@ export class Permissions {
   private sessionAllow = new Set<string>();
   private readonly rules: ParsedRules;
   private readonly root: string;
+  private readonly saveRuleFn: ((rule: string) => void) | undefined;
   private _mode: PermissionMode;
   private listeners = new Set<(mode: PermissionMode) => void>();
 
@@ -73,6 +78,7 @@ export class Permissions {
     this._mode = mode;
     this.rules = parseRules(opts.rules);
     this.root = opts.root ?? process.cwd();
+    this.saveRuleFn = opts.saveRule;
   }
 
   get mode(): PermissionMode {
@@ -218,12 +224,25 @@ export class Permissions {
   ): Promise<Decision> {
     const { alwaysKey, ...req } = extra;
     const key = alwaysKey ?? sessionKey(tool, summary);
+    // Offer a rule to save, for ordinary asks (not dangerous commands, outside paths or ask rules).
+    if (this.saveRuleFn && extra.allowAlways !== false && !extra.alwaysLabel && !extra.warning) {
+      const rule = suggestRule(tool, input, this.root);
+      if (rule) req.saveRule = rule;
+    }
     // One question at a time (parallel subagents may ask together); an
     // "always" given while this one waited counts for it too.
     const answer = await this.serial(async (): Promise<AskAnswer> =>
       extra.allowAlways !== false && this.sessionAllow.has(key) ? { kind: "yes" } : this.ask!({ tool, input, summary, kind: "tool", ...req }),
     );
     if (answer.kind === "always" && extra.allowAlways !== false) this.sessionAllow.add(key);
+    if (answer.kind === "save" && req.saveRule) {
+      this.rules.allow.push(parseRule(req.saveRule));
+      try {
+        this.saveRuleFn?.(req.saveRule);
+      } catch {
+        // Still applies for this session.
+      }
+    }
     if (answer.kind === "no") {
       return { allow: false, reason: answer.reason ? `The user denied this: ${answer.reason}` : "The user denied this tool call." };
     }
@@ -276,6 +295,33 @@ function safeSummary(tool: Tool, input: unknown): string {
 }
 
 /** "Always" for bash approves that exact command; for other tools, the tool. */
+/**
+ * The allow rule to offer for a call: bash by command prefix ("npm test",
+ * "npm run build", "git status"), file tools by path, others by name.
+ * Compound or tricky commands get none.
+ */
+export function suggestRule(tool: string, input: unknown, root: string): string | undefined {
+  const i = (input ?? {}) as { command?: unknown; path?: unknown };
+  if (tool === "bash") {
+    const cmd = typeof i.command === "string" ? i.command.trim() : "";
+    if (!cmd || splitCommand(cmd).length !== 1 || hasShellTricks(cmd)) return undefined;
+    const words = cmd.split(/\s+/);
+    const prefix = [words[0]!];
+    const sub = /^[a-z][\w:.-]*$/i;
+    if (words[1] && sub.test(words[1])) {
+      prefix.push(words[1]);
+      if (["run", "exec", "x"].includes(words[1]) && words[2] && sub.test(words[2])) prefix.push(words[2]);
+    }
+    return `bash(${prefix.join(" ")}:*)`;
+  }
+  if (EDIT_TOOLS.has(tool) && typeof i.path === "string") {
+    const abs = path.resolve(root, normalizeInputPath(i.path));
+    if (!isInside(root, abs)) return undefined;
+    return `${tool}(${path.relative(root, abs).split(path.sep).join("/")})`;
+  }
+  return /^[a-z_]+$/.test(tool) ? tool : undefined;
+}
+
 function sessionKey(tool: string, summary: string): string {
   return tool === "bash" ? `bash:${summary}` : tool;
 }
