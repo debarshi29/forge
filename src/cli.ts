@@ -22,6 +22,8 @@ import { formatBench, runBench } from "./bench/index.js";
 import { loadAgentTypes } from "./agent/subagents.js";
 import { makeStatusLine } from "./agent/statusLine.js";
 import { runGoal, type GoalOptions } from "./agent/goal.js";
+import { parseCommand, type CommandContext } from "./commands/index.js";
+import type { Block } from "./providers/types.js";
 import { makeTaskTool } from "./tools/task.js";
 import type { ProviderSettings } from "./providers/registry.js";
 import { defaultTools } from "./tools/registry.js";
@@ -178,11 +180,44 @@ const program = new Command()
     if (!headless) for (const w of warnings) initialItems = [...(initialItems ?? []), { kind: "info", text: `⚠ ${w}`, tone: "warn" }];
 
     if (flags.print !== undefined) {
-      const goal =
-        flags.goal || flags.check
-          ? { objective: flags.print, ...(flags.check ? { check: flags.check } : {}), ...(flags.maxRounds ? { maxRounds: Number(flags.maxRounds) } : {}) }
-          : undefined;
-      const ok = await runPrompt(agent, flags.print, flags.output, goal ? { goal, root } : undefined);
+      // Git Bash rewrites a leading "/usage" into "C:/Program Files/Git/usage"; undo that for slash commands.
+      flags.print = flags.print.replace(/^[A-Za-z]:[\\/]Program Files[\\/]Git[\\/](?=[a-z][\w-]*(\s|$))/i, "/");
+      const command = parseCommand(flags.print.trim());
+      let ok: boolean;
+      if (command?.command) {
+        // Slash commands work headless too (forge -p "/review", "/commit", "/usage").
+        ok = true;
+        let ran = false;
+        const ctx: CommandContext = {
+          agent,
+          root,
+          print: (text, tone) => process.stderr.write(`${tone === "error" ? "\x1b[31m" : tone === "warn" ? "\x1b[33m" : ""}${text}\x1b[0m\n`),
+          clearTranscript: () => {},
+          startNewSession: () => {},
+          openResume: () => process.stderr.write("Use --resume <id> to resume a session.\n"),
+          setMode: (m) => (agent.permissions.mode = m),
+          exit: () => {},
+          allowBypass: config.permissionMode === "bypass",
+          memory,
+          sendPrompt: async (p) => {
+            ran = true;
+            ok = await runPrompt(agent, p, flags.output);
+          },
+          runGoal: async (goal) => {
+            ran = true;
+            ok = await runPrompt(agent, goal.objective, flags.output, { goal, root });
+          },
+        };
+        await command.command.run(command.args, ctx);
+        // A command that only printed something (or refused) succeeds unless it reported an error.
+        if (!ran) ok = !process.exitCode;
+      } else {
+        const goal =
+          flags.goal || flags.check
+            ? { objective: flags.print, ...(flags.check ? { check: flags.check } : {}), ...(flags.maxRounds ? { maxRounds: Number(flags.maxRounds) } : {}) }
+            : undefined;
+        ok = await runPrompt(agent, flags.print, flags.output, goal ? { goal, root } : undefined);
+      }
       rl?.close();
       process.exitCode = ok ? 0 : 1;
       return;
@@ -337,13 +372,13 @@ async function benchCommand(specs: string[], settings: ProviderSettings): Promis
 }
 
 /** Run one prompt; Ctrl+C aborts the turn. Returns false on error/refusal. */
-async function runPrompt(agent: Agent, prompt: string, output: "text" | "json", goalRun?: { goal: GoalOptions; root: string }): Promise<boolean> {
+async function runPrompt(agent: Agent, prompt: string | Block[], output: "text" | "json", goalRun?: { goal: GoalOptions; root: string }): Promise<boolean> {
   const ac = new AbortController();
   const onSigint = () => ac.abort();
   process.once("SIGINT", onSigint);
   let ok = true;
   try {
-    let next: string | [] = prompt;
+    let next: string | Block[] = prompt;
     // Background agents report back after the turn: wait for them and let the model use their reports.
     while (true) {
       const first = goalRun && next === prompt;

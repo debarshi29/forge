@@ -9,6 +9,8 @@ import { formatTodos } from "../tools/todo.js";
 import { readHistory, statsReport, usageReport } from "../agent/stats.js";
 import { parseGoalArgs, type GoalOptions } from "../agent/goal.js";
 import { branchTree } from "../agent/fork.js";
+import { ciGoal, commitPrompt, GitError, prPrompt, reviewPrompt } from "./git.js";
+import type { Block } from "../providers/types.js";
 
 export interface CommandContext {
   agent: Agent;
@@ -53,6 +55,8 @@ export interface CommandContext {
   fork?(opts: { worktree?: boolean }): Promise<string>;
   /** Open the rewind picker (Esc Esc). */
   openRewind?(): void;
+  /** Send a prompt to the model as a turn (commands like /commit build one). */
+  sendPrompt?(prompt: string | Block[]): Promise<void>;
   /** Work on a goal across turns (/goal). */
   runGoal?(goal: GoalOptions): Promise<void>;
   /** Repeating prompts (/loop). */
@@ -258,6 +262,53 @@ export const COMMANDS: SlashCommand[] = [
       const specs = args.split(/\s+/).filter(Boolean);
       ctx.print(`Benchmarking ${specs.length ? specs.join(", ") : "the installed Ollama models"} on 5 tasks, each in a throwaway folder. This takes a few minutes; Esc stops it.`);
       await ctx.bench(specs);
+    },
+  },
+  {
+    name: "commit",
+    args: "[hint]",
+    description: "Commit the current changes with a message in the repository's style",
+    async run(args, ctx) {
+      await gitCommand(ctx, () => commitPrompt(ctx.root ?? process.cwd(), args.trim(), ctx.agent.contextWindow));
+    },
+  },
+  {
+    name: "pr",
+    args: "[base]",
+    description: "Push this branch and open a GitHub pull request (needs gh)",
+    async run(args, ctx) {
+      await gitCommand(ctx, () => prPrompt(ctx.root ?? process.cwd(), args.trim() || undefined, ctx.agent.contextWindow));
+    },
+  },
+  {
+    name: "review",
+    args: "[pr]",
+    description: "Review a pull request, or this branch's changes, for bugs (read-only)",
+    async run(args, ctx) {
+      await gitCommand(ctx, () => reviewPrompt(ctx.root ?? process.cwd(), args.trim() || undefined, ctx.agent.contextWindow, "general"));
+    },
+  },
+  {
+    name: "security-review",
+    args: "[pr]",
+    description: "Look for security problems in a pull request or this branch's changes (read-only)",
+    async run(args, ctx) {
+      await gitCommand(ctx, () => reviewPrompt(ctx.root ?? process.cwd(), args.trim() || undefined, ctx.agent.contextWindow, "security"));
+    },
+  },
+  {
+    name: "ci",
+    description: "Watch this branch's CI and fix failures until the checks pass (a goal; needs gh)",
+    async run(_a, ctx) {
+      if (ctx.busy) return ctx.print("Wait for the current turn to finish first.", "warn");
+      if (!ctx.runGoal) return ctx.print("Goals aren't available here.", "warn");
+      try {
+        const goal = await ciGoal(ctx.root ?? process.cwd());
+        ctx.print("Watching CI (gh pr checks --watch). Forge fixes failures, commits and pushes, then watches again; Esc stops.");
+        await ctx.runGoal(goal);
+      } catch (err) {
+        ctx.print(err instanceof Error ? err.message : String(err), err instanceof GitError ? "warn" : "error");
+      }
     },
   },
   {
@@ -516,6 +567,18 @@ export async function switchTo(spec: string, ctx: Pick<CommandContext, "agent" |
 }
 
 /** "32k" → 32768, "24576" → 24576; undefined if it isn't a size. */
+async function gitCommand(ctx: CommandContext, build: () => Promise<Block[]>): Promise<void> {
+  if (ctx.busy) return ctx.print("Wait for the current turn to finish first.", "warn");
+  if (!ctx.sendPrompt) return ctx.print("This command isn't available here.", "warn");
+  let p: Block[];
+  try {
+    p = await build();
+  } catch (err) {
+    return ctx.print(err instanceof Error ? err.message : String(err), err instanceof GitError ? "warn" : "error");
+  }
+  await ctx.sendPrompt(p);
+}
+
 function ago(ms: number): string {
   const s = Math.round((Date.now() - ms) / 1000);
   if (s < 60) return `${s}s ago`;
