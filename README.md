@@ -4,7 +4,7 @@ A from-scratch terminal coding agent in the spirit of Claude Code and Codex CLI:
 
 - **Provider-agnostic:** Anthropic Claude (first-class), Google Gemini, OpenAI, and Ollama / OpenAI-compatible local models.
 - **Built in TypeScript** on Node 22+.
-- **Features:** Ink TUI, permission modes and plan mode, hooks, sessions and resume, context compaction, task lists, subagents (parallel and background, custom types), and help for small local models (tool-call repair, repo map, checks after edits, `/bench`). Planned: MCP client.
+- **Features:** Ink TUI, permission modes and plan mode, hooks, sessions and resume, context compaction, task lists, subagents (parallel and background, custom types), checkpoints and rewind, goals and loops, git workflows, MCP servers, custom commands, skills and plugins, and help for small local models (tool-call repair, repo map, checks after edits, `/bench`).
 
 > Status: early development. See [PLAN.md](PLAN.md) for the architecture and milestones.
 
@@ -156,6 +156,41 @@ forge --no-session        # don't save this one
 ```
 
 `/cost` shows tokens and estimated cost (Anthropic list prices, including cache reads and writes).
+
+### MCP servers
+
+Forge is an MCP client. Servers go under `"mcpServers"` in either settings file (a project entry replaces a user one
+with the same name):
+
+```json
+{
+  "mcpServers": {
+    "github": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_TOKEN": "…" } },
+    "docs": { "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer …" } }
+  }
+}
+```
+
+Local servers (`command`) speak JSON-RPC over stdio; remote ones (`url`) use Streamable HTTP. Their tools appear as
+`mcp__<server>__<tool>` and go through permissions like any other tool: tools the server marks read-only run freely,
+others ask. Allow a whole server with a rule like `"mcp__github__*"`. Servers connect in the background at start-up;
+`/mcp` shows which connected and their tools.
+
+### Extending Forge
+
+- **`web_fetch`** fetches a URL and returns readable text (HTML converted, links kept) or pretty JSON. It asks first;
+  allow sites with rules like `web_fetch(https://docs.python.org/*)`.
+- **Custom commands.** A Markdown file `~/.forge/commands/<name>.md` or `.forge/commands/<name>.md` becomes `/<name>`.
+  Its text is the prompt; `$ARGUMENTS` is everything after the command and `$1`…`$9` single words (with no
+  placeholder, arguments are appended). Optional frontmatter: `description`, `argument-hint`.
+- **Skills.** A folder `~/.forge/skills/<name>/` or `.forge/skills/<name>/` with a `SKILL.md` (frontmatter `name`,
+  `description`) and any scripts or references it needs. Forge lists the skills in its instructions and loads one with
+  the `skill` tool when a task matches.
+- **Plugins.** A folder in `~/.forge/plugins/` or `.forge/plugins/` bundling `commands/`, `agents/` and `skills/`,
+  plus an optional `plugin.json` with `hooks` and `mcpServers` (`${PLUGIN_DIR}` expands to the plugin's folder).
+  `/plugins` lists what is loaded.
+- **`/init`** writes an `AGENTS.md` for the project (build and test commands, layout, conventions), or improves the
+  one that's there.
 
 ### Git and GitHub
 

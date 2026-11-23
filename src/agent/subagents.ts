@@ -78,10 +78,10 @@ export function parseAgentFile(text: string, source: string): AgentType {
  * Built-in agents, then ~/.forge/agents/*.md, then <project>/.forge/agents/*.md.
  * A later definition with the same name replaces an earlier one.
  */
-export function loadAgentTypes(root: string, env: NodeJS.ProcessEnv = process.env): { types: AgentType[]; errors: string[] } {
+export function loadAgentTypes(root: string, env: NodeJS.ProcessEnv = process.env, extraDirs: string[] = []): { types: AgentType[]; errors: string[] } {
   const byName = new Map(BUILTIN_AGENTS.map((a) => [a.name, a]));
   const errors: string[] = [];
-  for (const dir of [path.join(forgeHome(env), "agents"), path.join(root, ".forge", "agents")]) {
+  for (const dir of [path.join(forgeHome(env), "agents"), path.join(root, ".forge", "agents"), ...extraDirs]) {
     let files: string[];
     try {
       files = readdirSync(dir).filter((f) => f.endsWith(".md")).sort();

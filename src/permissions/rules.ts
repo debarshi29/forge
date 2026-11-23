@@ -56,7 +56,9 @@ export interface MatchContext {
 
 /** Does the rule cover this call? For bash, `segments` decides compound commands. */
 export function ruleMatches(rule: Rule, tool: string, input: unknown, ctx: MatchContext): boolean {
-  if (rule.tool !== "*" && rule.tool !== tool.toLowerCase()) return false;
+  // "mcp__github__*" covers every tool of a server.
+  const name = tool.toLowerCase();
+  if (rule.tool !== "*" && (rule.tool.includes("*") ? !wildcard(rule.tool).test(name) : rule.tool !== name)) return false;
   if (rule.pattern === undefined) return true;
   const i = (input ?? {}) as Record<string, unknown>;
   if (tool === "bash") return bashMatches(rule.pattern, String(i.command ?? ""));

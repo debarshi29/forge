@@ -37,6 +37,8 @@ import { RewindPicker } from "./RewindPicker.js";
 /** Lets the Permissions object (created before render) ask through the UI. */
 export interface AskBridge {
   ask?: AskFn;
+  /** Show a notice in the transcript (set by the App; e.g. MCP servers connecting). */
+  notify?(text: string, tone?: "info" | "warn" | "error"): void;
 }
 
 interface Props {
@@ -58,6 +60,10 @@ interface Props {
   listModels?(): Promise<ModelOption[]>;
   /** /context <size>: run the current Ollama model with this context (wired by the CLI). */
   setContextLength?(tokens: number | "auto" | undefined, progress?: (text: string) => void): Promise<{ text: string; tone?: "info" | "warn" }>;
+  /** MCP servers, for /mcp (wired by the CLI). */
+  mcp?: { describe(): string };
+  /** Loaded plugins, skills and custom commands, for /plugins. */
+  extensions?: { describe(): string };
   /** Custom status line under the prompt (settings "statusLine", wired by the CLI). */
   statusLine?(state: StatusState): Promise<string>;
   /** /bench: score models on fixed tasks; returns the results table (wired by the CLI). */
@@ -84,7 +90,7 @@ const MODE_LABEL: Record<PermissionMode, string> = {
   bypass: "bypass permissions",
 };
 
-export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel, listModels, setContextLength, bench, statusLine, initialTheme = DEFAULT_THEME, saveTheme, initialPet, savePet, mouse }: Props) {
+export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel, listModels, setContextLength, bench, statusLine, mcp, extensions, initialTheme = DEFAULT_THEME, saveTheme, initialPet, savePet, mouse }: Props) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const nextId = useRef(1);
@@ -167,8 +173,10 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
 
   useEffect(() => {
     bridge.ask = (req) => new Promise<AskAnswer>((resolve) => setPending({ req, resolve }));
+    bridge.notify = (text, tone) => push({ kind: "info", text, ...(tone ? { tone } : {}) });
     return () => {
       bridge.ask = undefined;
+      bridge.notify = undefined;
     };
   }, [bridge]);
 
@@ -381,6 +389,8 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     print: (text, tone) => push({ kind: "info", text, tone }),
     root,
     env,
+    ...(mcp ? { mcp } : {}),
+    ...(extensions ? { extensions } : {}),
     reloadTranscript: () => {
       setTodos([...agent.todos]);
       resetTranscript(messagesToItems(agent.messages, agent.tools));

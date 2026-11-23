@@ -54,6 +54,8 @@ export interface Tool<S extends z.ZodType = z.ZodType> {
   /** The main prompt-engineering surface: when to use it and the pitfalls. */
   description: string;
   schema: S;
+  /** Send this JSON schema instead of one derived from `schema` (MCP tools bring their own). */
+  jsonSchema?: Record<string, unknown>;
   /** Read-only tools are auto-allowed and may run in parallel. */
   readOnly: boolean;
   run(input: z.infer<S>, ctx: ToolContext): Promise<ToolResult>;
