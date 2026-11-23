@@ -27,6 +27,7 @@ function optionsFor(req: PermissionRequest): Option[] {
   return [
     { label: "Yes", answer: { kind: "yes" } },
     ...(req.allowAlways === false ? [] : [{ label: req.alwaysLabel ?? "Yes, and don't ask again this session", answer: { kind: "always" } } as Option]),
+    ...(req.saveRule ? [{ label: `Yes, and always allow ${req.saveRule} in this project`, answer: { kind: "save" } } as Option] : []),
     { label: "No, and tell Forge what to do instead" },
   ];
 }

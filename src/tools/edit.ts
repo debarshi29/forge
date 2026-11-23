@@ -97,6 +97,7 @@ export const editTool = defineTool({
     let after = before;
     // Replace from the end so earlier offsets stay valid.
     for (const [start, end] of [...spans].reverse()) after = after.slice(0, start) + found.newStr + after.slice(end);
+    await ctx.checkpoint?.before(abs);
     await fs.writeFile(abs, after, "utf8");
     await recordWrite(ctx, abs);
     const note =

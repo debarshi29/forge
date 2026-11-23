@@ -11,7 +11,7 @@ import { loadMemory } from "./agent/memory.js";
 import { findSession, listSessions, resumeInto, Session } from "./agent/session.js";
 import { buildSystemPrompt } from "./agent/systemPrompt.js";
 import { messagesToItems } from "./ui/history.js";
-import { loadConfig, saveOllamaContextLength, saveUserSettings } from "./config/index.js";
+import { addProjectAllowRule, loadConfig, saveOllamaContextLength, saveUserSettings } from "./config/index.js";
 import { DEFAULT_THEME, findTheme } from "./ui/theme.js";
 import { PERMISSION_MODES, Permissions, type AskFn, type PermissionMode } from "./permissions/index.js";
 import { Hooks } from "./hooks/index.js";
@@ -114,8 +114,10 @@ const program = new Command()
         }
         if (req.warning) process.stderr.write(`\n\x1b[31m⚠ ${req.warning}\x1b[0m`);
         const always = req.allowAlways === false ? "" : " / [a]lways";
-        const a = (await rl.question(`\n\x1b[36m? Allow ${req.tool}: ${req.summary}\x1b[0m  [y]es${always} / [n]o (reason): `)).trim();
+        const save = req.saveRule ? ` / [s]ave ${req.saveRule}` : "";
+        const a = (await rl.question(`\n\x1b[36m? Allow ${req.tool}: ${req.summary}\x1b[0m  [y]es${always}${save} / [n]o (reason): `)).trim();
         if (/^a/i.test(a) && req.allowAlways !== false) return { kind: "always" };
+        if (/^s/i.test(a) && req.saveRule) return { kind: "save" };
         if (/^y/i.test(a) || a === "") return { kind: "yes" };
         return { kind: "no", reason: a.replace(/^n(o)?\s*/i, "") || undefined };
       };
@@ -130,7 +132,7 @@ const program = new Command()
       model,
       system: buildSystemPrompt({ root, cwd: root, model: resolved.spec, memory }),
       tools,
-      permissions: new Permissions(config.permissionMode, ask, { rules: config.permissions, root }),
+      permissions: new Permissions(config.permissionMode, ask, { rules: config.permissions, root, saveRule: (rule) => addProjectAllowRule(root, rule) }),
       root,
       maxTokens: config.maxTokens,
       hooks: new Hooks(config.hooks, root),

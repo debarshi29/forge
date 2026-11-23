@@ -93,6 +93,41 @@ async function mount(
   return { root, agent, stdout, type, send };
 }
 
+describe("TUI rewind and fork", () => {
+  it("opens the rewind picker with Esc Esc and restores the code", async () => {
+    const { stdout, type, send, root } = await mount(
+      [{ toolCalls: [{ name: "write", input: { path: "made.txt", content: "x" } }] }, { text: "Created it." }],
+      "bypass",
+    );
+    await type("make a file\r");
+    await until(() => stdout.text().includes("Created it."));
+    expect(await fs.readFile(path.join(root, "made.txt"), "utf8")).toBe("x");
+    await send("\x1b");
+    await send("\x1b");
+    await until(() => stdout.text().includes("Rewind (↑/↓, Enter, Esc to cancel)"));
+    await send("\r");
+    await until(() => stdout.text().includes("Restore code and conversation"));
+    await send("1");
+    await until(() => stdout.text().includes('Rewound the conversation and the code (removed 1 created file) to before prompt 1: "make a file".'));
+    await expect(fs.stat(path.join(root, "made.txt"))).rejects.toThrow();
+  });
+
+  it("forks into a new session", async () => {
+    const home = await tempDir();
+    const env = { FORGE_HOME: home };
+    const root = await tempDir();
+    const session = new Session(root, "fake:fake", { env });
+    const { stdout, type, agent } = await mount([{ text: "hello" }], "default", { root, env, agent: { recorder: session } });
+    await type("hi\r");
+    await until(() => stdout.text().includes("hello"));
+    await type("/fork\r");
+    await until(() => stdout.text().includes("Forked: you're now in session"));
+    expect((agent.recorder as Session).parent).toBe(session.id);
+    await type("/branches\r");
+    await until(() => stdout.text().includes(`● ${(agent.recorder as Session).id}`));
+  });
+});
+
 describe("TUI loops and goals", () => {
   it("runs a loop's prompt right away, lists it, and stops it", async () => {
     const { stdout, type } = await mount([{ text: "CI is green" }]);

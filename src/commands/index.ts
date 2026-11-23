@@ -8,6 +8,7 @@ import { contextBreakdown, formatContext } from "../agent/context.js";
 import { formatTodos } from "../tools/todo.js";
 import { readHistory, statsReport, usageReport } from "../agent/stats.js";
 import { parseGoalArgs, type GoalOptions } from "../agent/goal.js";
+import { branchTree } from "../agent/fork.js";
 
 export interface CommandContext {
   agent: Agent;
@@ -46,6 +47,12 @@ export interface CommandContext {
   setContextLength?(tokens: number | "auto" | undefined): Promise<{ text: string; tone?: "info" | "warn" }>;
   /** Score models on fixed tasks and print a table (/bench). */
   bench?(specs: string[]): Promise<void>;
+  /** Redraw the transcript from the agent's messages (after /rewind). */
+  reloadTranscript?(): void;
+  /** Copy the session and continue in the copy (or in a git worktree); returns a report. */
+  fork?(opts: { worktree?: boolean }): Promise<string>;
+  /** Open the rewind picker (Esc Esc). */
+  openRewind?(): void;
   /** Work on a goal across turns (/goal). */
   runGoal?(goal: GoalOptions): Promise<void>;
   /** Repeating prompts (/loop). */
@@ -254,6 +261,76 @@ export const COMMANDS: SlashCommand[] = [
     },
   },
   {
+    name: "rewind",
+    args: "[n] [both|chat|code] [--force]",
+    description: "Go back to before prompt n: conversation, the files Forge changed, or both (Esc Esc)",
+    async run(args, ctx) {
+      if (ctx.busy) return ctx.print("Wait for the current turn to finish first.", "warn");
+      const parts = args.trim().split(/\s+/).filter(Boolean);
+      if (!parts.length) {
+        if (ctx.openRewind) return ctx.openRewind();
+        return ctx.print(listCheckpoints(ctx));
+      }
+      const n = Number(parts[0]);
+      const what = (parts.find((p) => ["both", "chat", "code"].includes(p)) ?? "both") as "both" | "chat" | "code";
+      if (!Number.isInteger(n)) return ctx.print("Usage: /rewind [n] [both|chat|code] [--force]", "error");
+      await rewindTo(ctx, n, what, parts.includes("--force"));
+    },
+  },
+  {
+    name: "reset",
+    args: "[--hard] [--to n]",
+    description: "Drop the conversation back to prompt n (default: the start); --hard also restores files",
+    async run(args, ctx) {
+      if (ctx.busy) return ctx.print("Wait for the current turn to finish first.", "warn");
+      const to = /--to\s+(\d+)/.exec(args);
+      if (!ctx.agent.checkpoints.list.length) return ctx.print("Nothing to reset yet.");
+      await rewindTo(ctx, to ? Number(to[1]) : 1, /--hard\b/.test(args) ? "both" : "chat", /--force\b/.test(args));
+    },
+  },
+  {
+    name: "fork",
+    args: "[--worktree]",
+    description: "Copy this conversation into a new session and continue there (--worktree: in a new git worktree)",
+    async run(args, ctx) {
+      if (ctx.busy) return ctx.print("Wait for the current turn to finish first.", "warn");
+      if (!ctx.fork) return ctx.print("Forking isn't available here (sessions are off).", "warn");
+      try {
+        ctx.print(await ctx.fork({ worktree: /--worktree\b/.test(args) }));
+      } catch (err) {
+        ctx.print(err instanceof Error ? err.message : String(err), "error");
+      }
+    },
+  },
+  {
+    name: "branch",
+    args: "<n>",
+    description: "Fork, then go back to before prompt n to try it differently (the original stays as it was)",
+    async run(args, ctx) {
+      if (ctx.busy) return ctx.print("Wait for the current turn to finish first.", "warn");
+      if (!ctx.fork) return ctx.print("Branching isn't available here (sessions are off).", "warn");
+      const n = Number(args.trim());
+      const cp = ctx.agent.checkpoints.get(n);
+      if (!Number.isInteger(n) || !cp) return ctx.print(`Usage: /branch <n>, where n is a prompt from /rewind.\n${listCheckpoints(ctx)}`, "error");
+      try {
+        ctx.print(await ctx.fork({}));
+      } catch (err) {
+        return ctx.print(err instanceof Error ? err.message : String(err), "error");
+      }
+      await rewindTo(ctx, n, "chat", false);
+      ctx.print(`Branched at prompt ${n}. It was:\n  ${cp.prompt.split("\n")[0]}\nType the new version of it.`);
+    },
+  },
+  {
+    name: "branches",
+    description: "Show the sessions forked from this one and its ancestors",
+    run(_a, ctx) {
+      const rec = ctx.agent.recorder as { id?: string } | undefined;
+      const tree = branchTree(ctx.root ?? process.cwd(), rec?.id, ctx.env);
+      ctx.print(tree ? `Branches (● is this session; /resume <id> switches):\n${tree}` : "No branches yet. /fork or /branch <n> makes one.");
+    },
+  },
+  {
     name: "goal",
     args: '<objective> [--check "<cmd>"] [--max-rounds N]',
     description: "Keep working until the goal is met: the check passes, or the model verifies it's done",
@@ -439,6 +516,45 @@ export async function switchTo(spec: string, ctx: Pick<CommandContext, "agent" |
 }
 
 /** "32k" → 32768, "24576" → 24576; undefined if it isn't a size. */
+function ago(ms: number): string {
+  const s = Math.round((Date.now() - ms) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
+}
+
+export function listCheckpoints(ctx: Pick<CommandContext, "agent">): string {
+  const list = ctx.agent.checkpoints.list;
+  if (!list.length) return "No checkpoints yet: each prompt you send makes one.";
+  const rows = list.map((c) => `  ${String(c.n).padStart(3)}  ${ago(c.at).padStart(7)}  ${c.prompt.split("\n")[0]!.slice(0, 60)}${c.files.size ? `  · ${c.files.size} file${c.files.size === 1 ? "" : "s"} changed` : ""}`);
+  return `Checkpoints (before each prompt):\n${rows.join("\n")}\n/rewind <n> [both|chat|code] goes back to before prompt n.`;
+}
+
+async function rewindTo(ctx: CommandContext, n: number, what: "both" | "chat" | "code", force: boolean): Promise<void> {
+  try {
+    const r = await ctx.agent.rewind(n, what, { force });
+    if (r.needsForce) {
+      return ctx.print(
+        `These files changed outside Forge since it last wrote them, so rewinding would lose those changes:\n${r.needsForce.map((f) => `  ${f}`).join("\n")}\nAdd --force to overwrite them anyway, or rewind just the conversation with "chat".`,
+        "warn",
+      );
+    }
+    if (what !== "code") ctx.reloadTranscript?.();
+    const code = r.code;
+    const files = code
+      ? [
+          code.restored.length ? `restored ${code.restored.length} file${code.restored.length === 1 ? "" : "s"}` : "",
+          code.deleted.length ? `removed ${code.deleted.length} created file${code.deleted.length === 1 ? "" : "s"}` : "",
+          code.skipped.length ? `skipped ${code.skipped.length} too big to snapshot` : "",
+        ].filter(Boolean).join(", ") || "no files to restore"
+      : "";
+    const parts = [what !== "code" ? "the conversation" : "", what !== "chat" ? `the code (${files})` : ""].filter(Boolean).join(" and ");
+    ctx.print(`Rewound ${parts} to before prompt ${n}: "${r.prompt.split("\n")[0]!.slice(0, 60)}".${what !== "chat" ? " Changes made by shell commands aren't undone." : ""}`);
+  } catch (err) {
+    ctx.print(err instanceof Error ? err.message : String(err), "error");
+  }
+}
+
 /** "30s", "10m", "2h" → milliseconds (at least 10 s). */
 export function parseInterval(s: string): number | undefined {
   const m = /^(\d+(?:\.\d+)?)(s|m|h)$/i.exec(s.trim());

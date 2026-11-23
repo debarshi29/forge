@@ -31,6 +31,8 @@ import { PermissionDialog } from "./PermissionDialog.js";
 import { ItemView, ToolCard, type Item } from "./Transcript.js";
 import type { StatusState } from "../agent/statusLine.js";
 import { runGoal } from "../agent/goal.js";
+import { createWorktree, forkSession } from "../agent/fork.js";
+import { RewindPicker } from "./RewindPicker.js";
 
 /** Lets the Permissions object (created before render) ask through the UI. */
 export interface AskBridge {
@@ -108,6 +110,8 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
   const [liveThinking, setLiveThinking] = useState("");
   const [running, setRunning] = useState<Array<{ id: string; name: string; summary: string; progress?: string }>>([]);
   const busyRef = useRef(false);
+  const [rewinding, setRewinding] = useState(false);
+  const lastEsc = useRef(0);
   const loopsRef = useRef(new Map<string, { id: string; everyMs: number; prompt: string; runs: number; timer: ReturnType<typeof setInterval> | undefined }>());
   const loopCounter = useRef(0);
   const runTurnRef = useRef<((prompt: string) => Promise<void>) | undefined>(undefined);
@@ -377,6 +381,26 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     print: (text, tone) => push({ kind: "info", text, tone }),
     root,
     env,
+    reloadTranscript: () => {
+      setTodos([...agent.todos]);
+      resetTranscript(messagesToItems(agent.messages, agent.tools));
+      setUsageTick((n) => n + 1);
+    },
+    openRewind: () => setRewinding(true),
+    fork: agent.recorder
+      ? async ({ worktree }) => {
+          const old = agent.recorder as { id?: string } | undefined;
+          if (worktree) {
+            const name = `fork-${Date.now().toString(36)}`;
+            const wt = await createWorktree(root, name);
+            const copy = forkSession(agent.messages, { root: wt.path, model: agent.modelSpec, ...(old?.id ? { parent: old.id } : {}), env });
+            return `Created a worktree at ${wt.path} on branch ${wt.branch}, with a copy of this conversation. Continue there in another terminal:\n  cd "${wt.path}" && forge --resume ${copy.id}\nThis session carries on here.`;
+          }
+          const copy = forkSession(agent.messages, { root, model: agent.modelSpec, ...(old?.id ? { parent: old.id } : {}), env });
+          agent.setRecorder(copy);
+          return `Forked: you're now in session ${copy.id}, a copy of ${old?.id ?? "the conversation"}. The original is unchanged (/resume ${old?.id ?? ""} goes back; /branches shows the tree).`;
+        }
+      : undefined,
     clearTranscript: () => {
       setTodos([]);
       resetTranscript();
@@ -498,6 +522,15 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
       return;
     }
     if (busy && (key.escape || (key.ctrl && input === "c"))) interrupt();
+    // Esc twice while idle opens the rewind picker.
+    if (!busy && key.escape && !pending && !sessions && !pickingModel && !pickingTheme && !pickingPet && !rewinding) {
+      const now = Date.now();
+      // Two quick presses can arrive as one "meta + escape" key.
+      if (key.meta || now - lastEsc.current < 600) {
+        lastEsc.current = 0;
+        setRewinding(true);
+      } else lastEsc.current = now;
+    }
   });
 
   const onCtrlC = (value: string) => {
@@ -626,6 +659,16 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
         />
       )}
 
+      {rewinding && !busy && (
+        <RewindPicker
+          checkpoints={agent.checkpoints.list}
+          onCancel={() => setRewinding(false)}
+          onPick={(n, what) => {
+            setRewinding(false);
+            submit(`/rewind ${n} ${what}`);
+          }}
+        />
+      )}
       {sessions && !busy && (
         <SessionPicker sessions={sessions} onPick={resume} onCancel={() => setSessions(undefined)} />
       )}
@@ -644,7 +687,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
 
       <Box marginTop={1} flexDirection="column">
         <Input
-          active={!pending && !((sessions || pickingModel || pickingTheme || pickingPet) && !busy)}
+          active={!pending && !((sessions || pickingModel || pickingTheme || pickingPet || rewinding) && !busy)}
           placeholder={busy ? "Working… (type /help, or Esc to interrupt)" : "Ask Forge to do something"}
           onSubmit={submit}
           onCtrlC={onCtrlC}

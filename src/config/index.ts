@@ -209,6 +209,23 @@ export function updateUserSettings(fn: (current: Record<string, unknown>) => Rec
   writeFileSync(file, JSON.stringify(fn(current), null, 2) + "\n");
 }
 
+/** Add an allow rule to <project>/.forge/settings.json (kept unique). */
+export function addProjectAllowRule(root: string, rule: string): void {
+  const file = path.join(root, ".forge", "settings.json");
+  let current: Record<string, unknown> = {};
+  try {
+    current = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  } catch {
+    // missing or unreadable: start fresh
+  }
+  const permissions = { ...((current.permissions as Record<string, unknown> | undefined) ?? {}) };
+  const allow = [...((permissions.allow as string[] | undefined) ?? [])];
+  if (!allow.includes(rule)) allow.push(rule);
+  permissions.allow = allow;
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ ...current, permissions }, null, 2) + "\n");
+}
+
 /** Save the context length for one Ollama model (undefined removes it). */
 export function saveOllamaContextLength(model: string, tokens: number | undefined, env: NodeJS.ProcessEnv = process.env): void {
   updateUserSettings((cur) => {

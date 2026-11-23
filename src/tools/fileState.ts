@@ -20,5 +20,7 @@ export async function checkFresh(ctx: ToolContext, abs: string, shown: string): 
 }
 
 export async function recordWrite(ctx: ToolContext, abs: string): Promise<void> {
-  ctx.fileState.set(abs, (await fs.stat(abs)).mtimeMs);
+  const mtime = (await fs.stat(abs)).mtimeMs;
+  ctx.fileState.set(abs, mtime);
+  ctx.checkpoint?.after(abs, mtime);
 }

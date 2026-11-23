@@ -157,6 +157,26 @@ forge --no-session        # don't save this one
 
 `/cost` shows tokens and estimated cost (Anthropic list prices, including cache reads and writes).
 
+### Checkpoints, rewind and branches
+
+Every prompt you send is a checkpoint. Before `write` or `edit` changes a file, Forge keeps its old contents (once per
+prompt; subagents' edits included), so you can go back:
+
+- **Esc Esc** (or `/rewind`) opens a list of your prompts. Pick one, then restore the code and the conversation, only
+  the conversation, or only the code, to how they were before that prompt. Files created since are removed.
+  `/rewind <n> [both|chat|code]` does it directly.
+- If a file changed outside Forge after Forge last wrote it, rewinding stops and lists it; add `--force` to overwrite.
+  Changes made by shell commands (`bash`) aren't tracked or undone.
+- **`/reset [--hard] [--to n]`**: drop the conversation back to prompt n (default: the start); `--hard` also restores
+  the files.
+- **`/fork`** copies the conversation into a new session and continues there; the original stays as it was.
+  `/fork --worktree` creates a git worktree next to the repository on a new `forge/fork-…` branch with a copy of the
+  conversation, and prints the command to continue there.
+- **`/branch <n>`** forks, then goes back to before prompt n, so you can try it a different way. **`/branches`**
+  shows the tree of forks; `/resume <id>` switches between them.
+- **Saving permissions.** Permission prompts offer "Yes, and always allow `bash(npm test:*)` in this project", which
+  adds the rule to `<project>/.forge/settings.json`.
+
 ### Goals, loops and budgets
 
 - **`/goal <objective> [--check "<cmd>"] [--max-rounds N]`** keeps Forge working across turns. With a check (`/goal
