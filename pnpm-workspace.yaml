@@ -1,2 +1,4 @@
 allowBuilds:
   esbuild: true
+  # Pulled in by @google/genai; its install script is not needed.
+  protobufjs: false
