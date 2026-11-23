@@ -4,7 +4,7 @@ A from-scratch terminal coding agent in the spirit of Claude Code and Codex CLI:
 
 - **Provider-agnostic:** Anthropic Claude (first-class), Google Gemini, OpenAI, and Ollama / OpenAI-compatible local models.
 - **Built in TypeScript** on Node 22+.
-- **Planned features:** rich Ink TUI, permission modes and plan mode, hooks, sessions and resume, context compaction, subagents, MCP client.
+- **Features:** Ink TUI, permission modes and plan mode, hooks, sessions and resume, context compaction, task lists, and help for small local models (tool-call repair, repo map, checks after edits, `/bench`). Planned: subagents, MCP client.
 
 > Status: early development. See [PLAN.md](PLAN.md) for the architecture and milestones.
 
@@ -68,8 +68,37 @@ export OLLAMA_CONTEXT_LENGTH=16384          # macOS / Linux (e.g. in your shell 
 Or set it per model from inside Forge: `/context 32k` runs the current Ollama model with a 32k context, saves that for
 the model, and tells you whether it still fits on the GPU (`/context default` goes back). Forge does this with a
 variant model such as `qwen2.5-coder:3b-ctx32k` that shares the original's weights, so it costs no disk space; variants
-are hidden from `/model`. `"ollama": {"contextWindow": …}` only changes what Forge assumes, not what Ollama runs. Small local models that write
-tool calls as JSON text instead of using native tool calls are handled too.
+are hidden from `/model`. `/context auto` picks the largest size that fits in free GPU memory (estimated from the model's
+layers and your `OLLAMA_KV_CACHE_TYPE`, then checked by loading it and stepping down if part of it spills onto the CPU).
+`"ollama": {"contextWindow": …}` only changes what Forge assumes, not what Ollama runs.
+
+### Small local models
+
+Forge works around the mistakes small models make, so a 3B–8B model on your own GPU gets real work done:
+
+- **Malformed tool calls are repaired.** Calls written as JSON text are turned into real calls, invented tool names
+  (`read_file`, `run_command`) are mapped to the real tools, and when the arguments don't fit the tool, Forge asks the
+  model again with its output constrained to the tool's JSON schema (Ollama/LM Studio structured output), so the
+  retry is valid by construction. Turn the retry off with `"repairToolCalls": false`.
+- **Edits that almost match still apply.** `old_string` written with different whitespace (one line instead of three)
+  or with `read`'s line-number prefixes is matched anyway, and the result says so.
+- **Wrong paths get suggestions:** "File not found: server.js. Files with similar names: src/server/app.js".
+- **Errors after edits come back.** After `write`/`edit`, Forge checks the changed files (the project's `tsc`, `node
+  --check`, `python -m py_compile`, JSON) and tells the model about new problems. Use your own checker with
+  `"diagnostics": {"command": "npx eslint {files}"}`, or turn it off with `"diagnostics": false`.
+- **`repo_map`** lists every source file with the functions and classes it defines, so the model can find its way
+  around without reading everything.
+- **Stalls and loops.** A reply that announces a step and stops ("Now let's update main.js:") gets a nudge to carry on;
+  a reply stuck repeating itself is cut off; a `write` to a file read in the same reply (before the model has seen it)
+  is refused.
+- **Lower temperature.** Local models run at temperature 0.2 unless you set `"ollama": {"temperature": …}`.
+- **A fast model for side work.** `"models": {"fast": "ollama:qwen2.5-coder:1.5b"}` writes compaction summaries with a
+  smaller model.
+
+**`/bench`** (or `forge --bench [models…]` in a terminal) scores models on five small tasks (create a file, fix a bug,
+find a fact, run a command, rename across two files), each in a throwaway folder, and prints a table with passes,
+time and output speed. With no arguments it runs every installed Ollama model that supports tools. Set
+`FORGE_BENCH_TRACE=1` to see what a model did on the tasks it failed.
 
 ### Context and tasks
 

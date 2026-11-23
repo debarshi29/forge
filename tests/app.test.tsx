@@ -336,12 +336,12 @@ describe("TUI", () => {
   });
 
   it("sets the context size with /context <size>", async () => {
-    const calls: Array<number | undefined> = [];
+    const calls: Array<number | "auto" | undefined> = [];
     const { stdout, type } = await mount([], "default", {
       extra: {
         setContextLength: async (tokens) => {
           calls.push(tokens);
-          return { text: tokens ? `now runs with a ${tokens / 1024}k context. It fits entirely on the GPU.` : "back to the default" };
+          return { text: typeof tokens === "number" ? `now runs with a ${tokens / 1024}k context. It fits entirely on the GPU.` : "back to the default" };
         },
       },
     });

@@ -6,7 +6,8 @@ import type {
   ChatCompletionMessageToolCall,
 } from "openai/resources/chat/completions";
 import { ProviderStreamError } from "./errors.js";
-import type { Block, Message, Provider, ProviderCapabilities, StopReason, StreamEvent, StreamRequest } from "./types.js";
+import { canonicalToolName } from "./toolNames.js";
+import type { Block, JsonRequest, JsonResult, Message, Provider, ProviderCapabilities, StopReason, StreamEvent, StreamRequest } from "./types.js";
 
 export interface OpenAIOptions {
   /** Provider name used in model specs and history ("openai", "ollama", ...). */
@@ -20,6 +21,8 @@ export interface OpenAIOptions {
    * OpenAI itself wants `max_completion_tokens`.
    */
   compat?: boolean;
+  /** Sampling temperature; unset leaves it to the server (or the model's own default). */
+  temperature?: number;
   client?: OpenAI;
 }
 
@@ -29,17 +32,43 @@ export class OpenAIProvider implements Provider {
   private client: OpenAI;
   private compat: boolean;
   private contextWindow: number;
+  private temperature: number | undefined;
 
   constructor(opts: OpenAIOptions = {}) {
     this.name = opts.name ?? "openai";
     this.compat = opts.compat ?? false;
     this.contextWindow = opts.contextWindow ?? (this.compat ? 32_768 : 400_000);
+    this.temperature = opts.temperature;
     this.client =
       opts.client ??
       new OpenAI({
         apiKey: opts.apiKey ?? process.env.OPENAI_API_KEY ?? (this.compat ? "not-needed" : undefined),
         ...(opts.baseURL ? { baseURL: opts.baseURL } : {}),
       });
+  }
+
+  /**
+   * Structured output: a reply forced to match a JSON schema. Local servers
+   * (Ollama, LM Studio) constrain decoding to the schema, so even a small
+   * model returns valid JSON. Used to repair malformed tool calls.
+   */
+  async generateJson(req: JsonRequest): Promise<JsonResult> {
+    const res = await this.client.chat.completions.create(
+      {
+        model: req.model,
+        messages: [{ role: "system", content: req.system }, ...toOpenAIMessages(req.messages)],
+        temperature: 0,
+        ...(this.compat ? { max_tokens: req.maxTokens ?? 4096 } : { max_completion_tokens: req.maxTokens ?? 4096 }),
+        response_format: { type: "json_schema", json_schema: { name: "output", schema: req.schema } },
+      },
+      { signal: req.signal },
+    );
+    const text = res.choices[0]?.message?.content ?? "";
+    const value: unknown = JSON.parse(text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
+    return {
+      value,
+      usage: { inputTokens: res.usage?.prompt_tokens ?? 0, outputTokens: res.usage?.completion_tokens ?? 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    };
   }
 
   capabilities(): ProviderCapabilities {
@@ -53,6 +82,7 @@ export class OpenAIProvider implements Provider {
       messages: [{ role: "system", content: req.system }, ...toOpenAIMessages(req.messages)],
       stream: true,
       stream_options: { include_usage: true },
+      ...(this.temperature !== undefined ? { temperature: this.temperature } : {}),
       ...(this.compat ? { max_tokens: maxTokens } : { max_completion_tokens: maxTokens }),
       ...(req.tools.length
         ? {
@@ -71,9 +101,14 @@ export class OpenAIProvider implements Provider {
     let usage: OpenAI.CompletionUsage | undefined;
     const calls = new Map<number, { id: string; name: string; args: string; announced: boolean }>();
     const holdback = this.compat ? new ToolCallHoldback() : undefined;
+    // Our own signal too, so a runaway reply can be stopped on the server.
+    const local = new AbortController();
+    const forward = () => local.abort();
+    req.signal?.addEventListener("abort", forward, { once: true });
+    let runaway = false;
 
     try {
-      const stream = await this.client.chat.completions.create(params, { signal: req.signal });
+      const stream = await this.client.chat.completions.create(params, { signal: local.signal });
       for await (const chunk of stream) {
         started = true;
         if (chunk.usage) usage = chunk.usage;
@@ -89,6 +124,15 @@ export class OpenAIProvider implements Provider {
           // tool call, so raw JSON never flashes up as the model's answer.
           const shown = holdback ? holdback.push(d.content) : d.content;
           if (shown) yield { type: "text_delta", text: shown };
+          // Small local models sometimes loop on the same text until max_tokens.
+          if (this.compat && calls.size === 0) {
+            const cut = repetitionCut(text);
+            if (cut !== undefined) {
+              text = text.slice(0, cut);
+              runaway = true;
+              break;
+            }
+          }
         }
         if (d.refusal) refusal += d.refusal;
         for (const tc of d.tool_calls ?? []) {
@@ -112,6 +156,9 @@ export class OpenAIProvider implements Provider {
     } catch (err) {
       if (err instanceof OpenAI.APIError || req.signal?.aborted) throw err;
       throw new ProviderStreamError(err instanceof Error ? err.message : String(err), started, err);
+    } finally {
+      req.signal?.removeEventListener("abort", forward);
+      if (runaway) local.abort();
     }
 
     const content: Block[] = [];
@@ -129,6 +176,7 @@ export class OpenAIProvider implements Provider {
         );
       }
     }
+    if (runaway) text = `${text.trimEnd()}\n\n[Forge stopped this reply because the model kept repeating itself.]`;
     if (holdback) {
       const remainder = holdback.finish(text);
       if (remainder) yield { type: "text_delta", text: remainder };
@@ -190,10 +238,11 @@ export function extractTextToolCalls(text: string, toolNames: Set<string>): Arra
   for (const c of candidates) {
     if (!c || typeof c !== "object") return [];
     const o = c as { name?: unknown; arguments?: unknown; parameters?: unknown };
-    if (typeof o.name !== "string" || !toolNames.has(o.name)) return [];
+    const name = typeof o.name === "string" ? canonicalToolName(o.name, toolNames) : undefined;
+    if (!name) return [];
     let args: unknown = o.arguments ?? o.parameters ?? {};
     if (typeof args === "string") args = parseArgs(args);
-    calls.push({ name: o.name, args });
+    calls.push({ name, args });
   }
   return calls;
 }
@@ -252,6 +301,22 @@ export function extractToolCalls(text: string, toolNames: Set<string>): { calls:
     .replace(/^[ \t]*(\{.*\})[ \t]*$/gm, (m, line: string) => (take(line) ? "" : m));
   rest = rest.replace(/\n{3,}/g, "\n\n").trim();
   return { calls, rest };
+}
+
+/**
+ * Detect a reply stuck in a loop: the last 50 characters occurring 12+
+ * times in the last 4000. Returns where to cut (after the first repetition),
+ * or undefined while the text still looks healthy.
+ */
+export function repetitionCut(text: string): number | undefined {
+  if (text.length < 1500) return undefined;
+  const tail = text.slice(-50);
+  if (tail.trim().length < 10) return undefined;
+  const windowStart = Math.max(0, text.length - 4000);
+  let count = 0;
+  for (let i = text.indexOf(tail, windowStart); i !== -1; i = text.indexOf(tail, i + tail.length)) count++;
+  if (count < 12) return undefined;
+  return text.indexOf(tail) + tail.length;
 }
 
 /** Start of something that may turn out to be a text-form tool call. */

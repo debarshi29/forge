@@ -8,11 +8,12 @@ import { globTool } from "./glob.js";
 import { grepTool } from "./grep.js";
 import { lsTool } from "./ls.js";
 import { readTool } from "./read.js";
+import { repoMapTool } from "./repoMap.js";
 import type { Tool } from "./types.js";
 import { writeTool } from "./write.js";
 
 export function defaultTools(): Tool[] {
-  return [readTool, writeTool, editTool, globTool, grepTool, lsTool, bashTool, todoWriteTool, exitPlanModeTool] as Tool[];
+  return [readTool, writeTool, editTool, globTool, grepTool, lsTool, repoMapTool, bashTool, todoWriteTool, exitPlanModeTool] as Tool[];
 }
 
 export function toToolSpec(tool: Tool): ToolSpec {

@@ -38,6 +38,12 @@ const SettingsSchema = z
     autoCompact: z.boolean(),
     /** Fraction of the context window that triggers auto-compaction (default 0.8). */
     compactThreshold: z.number().min(0.3).max(0.95),
+    /** Model roles: "main" (same as "model") and "fast" (summaries and other side work). */
+    models: z.object({ main: z.string(), fast: z.string() }).partial(),
+    /** Check files after edits: false to turn off, or a command to run instead of the built-in checks. */
+    diagnostics: z.union([z.boolean(), z.object({ command: z.string().min(1), timeout: z.number().positive() }).partial()]),
+    /** Re-ask local models for malformed tool arguments with schema-constrained output (default true). */
+    repairToolCalls: z.boolean(),
     theme: z.string(),
     pet: z.string(),
     petName: z.string(),
@@ -52,9 +58,11 @@ const SettingsSchema = z
         contextWindow: z.number().int().positive(),
         /** Per model: the context length to run it with (set by /context <size>). */
         contextLengths: z.record(z.string(), z.number().int().min(2048).max(1_048_576)),
+        /** Sampling temperature for local models (Forge's default is 0.2). */
+        temperature: z.number().min(0).max(2),
       })
       .partial(),
-    lmstudio: z.object({ baseURL: z.string(), contextWindow: z.number().int().positive() }).partial(),
+    lmstudio: z.object({ baseURL: z.string(), contextWindow: z.number().int().positive(), temperature: z.number().min(0).max(2) }).partial(),
     /** Permission rules like "bash(git status:*)" or "edit(src/**)". */
     permissions: z.object({ allow: RuleList, deny: RuleList, ask: RuleList }).partial(),
     /** Shell commands run around tool calls, prompts and stops. */
@@ -73,6 +81,10 @@ export interface Config {
   maxTokens?: number;
   autoCompact: boolean;
   compactThreshold: number;
+  /** Model for side work (summaries); undefined = the main model. */
+  fastModel?: string;
+  diagnostics: false | { command?: string; timeout?: number };
+  repairToolCalls: boolean;
   theme?: string;
   pet?: string;
   petName?: string;
@@ -128,7 +140,7 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
       sources.push(f);
       const next: Settings = { ...merged, ...s };
       // Provider sections merge key by key rather than replacing each other.
-      for (const k of PROVIDER_KEYS) next[k] = { ...merged[k], ...s[k] } as never;
+      for (const k of [...PROVIDER_KEYS, "models"] as const) next[k] = { ...merged[k], ...s[k] } as never;
       // Rules and hooks add up: a project can't silently drop the user's deny rules.
       next.permissions = {
         allow: [...(merged.permissions?.allow ?? []), ...(s.permissions?.allow ?? [])],
@@ -148,12 +160,15 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
   const defined = Object.fromEntries(Object.entries(flags).filter(([, v]) => v !== undefined)) as Settings;
   merged = { ...merged, ...fromEnv, ...defined };
   return {
-    model: merged.model ?? DEFAULT_MODEL,
+    model: defined.model ?? fromEnv.model ?? merged.models?.main ?? merged.model ?? DEFAULT_MODEL,
     effort: merged.effort ?? "high",
     permissionMode: merged.permissionMode ?? "default",
     maxTokens: merged.maxTokens,
     autoCompact: merged.autoCompact ?? true,
     compactThreshold: merged.compactThreshold ?? 0.8,
+    ...(merged.models?.fast ? { fastModel: merged.models.fast } : {}),
+    diagnostics: merged.diagnostics === false ? false : typeof merged.diagnostics === "object" ? merged.diagnostics : {},
+    repairToolCalls: merged.repairToolCalls ?? true,
     theme: merged.theme,
     pet: merged.pet,
     petName: merged.petName,

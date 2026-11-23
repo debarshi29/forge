@@ -125,7 +125,7 @@ describe("compaction in the agent", () => {
       ],
       { window: 1000 },
     );
-    const events = await collect(agent.send("list files"));
+    const events = await collect(agent.send(`list files\n${"context ".repeat(200)}`));
     const phases = events.flatMap((e) => (e.type === "compact" ? [e.phase] : []));
     expect(phases).toEqual(["start", "end"]);
     expect(events.at(-1)).toMatchObject({ type: "done", text: "all done" });

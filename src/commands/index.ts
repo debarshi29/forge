@@ -38,7 +38,9 @@ export interface CommandContext {
   /** A turn is running. */
   busy?: boolean;
   /** Run the current (Ollama) model with this context length; undefined = server default. Returns a report. */
-  setContextLength?(tokens: number | undefined): Promise<{ text: string; tone?: "info" | "warn" }>;
+  setContextLength?(tokens: number | "auto" | undefined): Promise<{ text: string; tone?: "info" | "warn" }>;
+  /** Score models on fixed tasks and print a table (/bench). */
+  bench?(specs: string[]): Promise<void>;
 }
 
 export interface SlashCommand {
@@ -198,25 +200,44 @@ export const COMMANDS: SlashCommand[] = [
   },
   {
     name: "context",
-    args: "[size | default]",
-    description: "Show what fills the context window, or set its size (e.g. /context 32k)",
+    args: "[size | auto | default]",
+    description: "Show what fills the context window, or set its size (/context 32k, or auto to fit the GPU)",
     async run(args, ctx) {
       const a = args.trim().toLowerCase();
       if (!a) return ctx.print(formatContext(contextBreakdown(ctx.agent, ctx.memory)));
       if (ctx.busy) return ctx.print("Wait for the current turn to finish, then change the context size.", "warn");
       if (!ctx.setContextLength) return ctx.print("Changing the context size isn't available here.", "warn");
-      let tokens: number | undefined;
-      if (!["default", "reset", "auto"].includes(a)) {
+      let tokens: number | "auto" | undefined;
+      if (a === "auto") tokens = "auto";
+      else if (!["default", "reset"].includes(a)) {
         tokens = parseContextSize(a);
-        if (tokens === undefined) return ctx.print('Usage: /context [size | default], e.g. /context 32k or /context 24576', "error");
+        if (tokens === undefined) return ctx.print('Usage: /context [size | auto | default], e.g. /context 32k or /context 24576', "error");
       }
-      ctx.print(tokens ? `Setting the context to ${Math.round(tokens / 1024)}k and loading the model…` : "Going back to Ollama's default context and loading the model…");
+      ctx.print(
+        tokens === "auto"
+          ? "Finding the largest context that fits in GPU memory…"
+          : tokens
+            ? `Setting the context to ${Math.round(tokens / 1024)}k and loading the model…`
+            : "Going back to Ollama's default context and loading the model…",
+      );
       try {
         const r = await ctx.setContextLength(tokens);
         ctx.print(r.text, r.tone);
       } catch (err) {
         ctx.print(err instanceof Error ? err.message : String(err), "error");
       }
+    },
+  },
+  {
+    name: "bench",
+    args: "[models…]",
+    description: "Score models on 5 fixed coding tasks (default: installed Ollama models)",
+    async run(args, ctx) {
+      if (ctx.busy) return ctx.print("Wait for the current turn to finish first.", "warn");
+      if (!ctx.bench) return ctx.print("Benchmarking isn't available here; run forge --bench in a terminal.", "warn");
+      const specs = args.split(/\s+/).filter(Boolean);
+      ctx.print(`Benchmarking ${specs.length ? specs.join(", ") : "the installed Ollama models"} on 5 tasks, each in a throwaway folder. This takes a few minutes; Esc stops it.`);
+      await ctx.bench(specs);
     },
   },
   {

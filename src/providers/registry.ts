@@ -20,9 +20,15 @@ export interface ProviderSettings {
   openai?: { apiKey?: string; baseURL?: string; contextWindow?: number };
   gemini?: GeminiOptions;
   /** contextLengths: per installed model, the context Forge asks Ollama to run it with. */
-  ollama?: { baseURL?: string; contextWindow?: number; contextLengths?: Record<string, number> };
-  lmstudio?: { baseURL?: string; contextWindow?: number };
+  ollama?: { baseURL?: string; contextWindow?: number; contextLengths?: Record<string, number>; temperature?: number };
+  lmstudio?: { baseURL?: string; contextWindow?: number; temperature?: number };
 }
+
+/**
+ * Local models default to a low temperature: Ollama's own default (0.8)
+ * makes small models' tool calls erratic. Override with "temperature".
+ */
+export const LOCAL_TEMPERATURE = Number(process.env.FORGE_LOCAL_TEMPERATURE ?? 0.2);
 
 const ALIASES: Record<string, string> = { google: "gemini", claude: "anthropic" };
 
@@ -52,6 +58,7 @@ export function resolveModel(spec: string, settings: ProviderSettings = {}): Res
           compat: true,
           baseURL: settings.ollama?.baseURL ?? process.env.OLLAMA_HOST?.replace(/\/?$/, "/v1") ?? "http://localhost:11434/v1",
           contextWindow: settings.ollama?.contextWindow,
+          temperature: settings.ollama?.temperature ?? LOCAL_TEMPERATURE,
         }),
         model,
         spec: canonical,
@@ -63,6 +70,7 @@ export function resolveModel(spec: string, settings: ProviderSettings = {}): Res
           compat: true,
           baseURL: settings.lmstudio?.baseURL ?? "http://localhost:1234/v1",
           contextWindow: settings.lmstudio?.contextWindow,
+          temperature: settings.lmstudio?.temperature ?? LOCAL_TEMPERATURE,
         }),
         model,
         spec: canonical,
