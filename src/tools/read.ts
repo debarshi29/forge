@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { displayPath, resolvePath } from "./paths.js";
+import { notFoundMessage } from "./suggest.js";
 import { defineTool, ToolError } from "./types.js";
 
 const IMAGE_TYPES: Record<string, string> = {
@@ -36,7 +37,7 @@ export const readTool = defineTool({
     try {
       stat = await fs.stat(abs);
     } catch {
-      throw new ToolError(`File not found: ${input.path}`);
+      throw new ToolError(await notFoundMessage(ctx.root, input.path, abs));
     }
     if (stat.isDirectory()) throw new ToolError(`${input.path} is a directory; use ls instead`);
 

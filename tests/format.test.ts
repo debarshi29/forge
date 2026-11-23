@@ -41,7 +41,7 @@ describe("slash commands", () => {
     expect(parseCommand("/quit")?.command?.name).toBe("exit");
     expect(parseCommand("/nope")?.command).toBeUndefined();
     expect(parseCommand("hello")).toBeUndefined();
-    expect(matchCommands("/c").map((c) => c.name)).toEqual(["clear", "compact", "context", "cost"]);
+    expect(matchCommands("/c").map((c) => c.name)).toEqual(["clear", "compact", "context", "cost", "bench"]);
     expect(matchCommands("/mod").map((c) => c.name)).toEqual(["mode", "model", "models"]);
     // Prefix matches first, then names that merely contain the text.
     expect(matchCommands("/me").map((c) => c.name)).toEqual(["memory", "resume", "theme", "themes"]);

@@ -53,7 +53,9 @@ interface Props {
   /** Models for the /model picker (wired by the CLI). */
   listModels?(): Promise<ModelOption[]>;
   /** /context <size>: run the current Ollama model with this context (wired by the CLI). */
-  setContextLength?(tokens: number | undefined): Promise<{ text: string; tone?: "info" | "warn" }>;
+  setContextLength?(tokens: number | "auto" | undefined, progress?: (text: string) => void): Promise<{ text: string; tone?: "info" | "warn" }>;
+  /** /bench: score models on fixed tasks; returns the results table (wired by the CLI). */
+  bench?(specs: string[], progress: (text: string) => void, signal: AbortSignal): Promise<string>;
   /** Theme to start with. */
   initialTheme?: Theme;
   /** Persist a theme choice (wired by the CLI). */
@@ -76,7 +78,7 @@ const MODE_LABEL: Record<PermissionMode, string> = {
   bypass: "bypass permissions",
 };
 
-export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel, listModels, setContextLength, initialTheme = DEFAULT_THEME, saveTheme, initialPet, savePet, mouse }: Props) {
+export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSession, initialItems, memory = [], env = process.env, switchModel, listModels, setContextLength, bench, initialTheme = DEFAULT_THEME, saveTheme, initialPet, savePet, mouse }: Props) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const nextId = useRef(1);
@@ -105,6 +107,8 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
   const [todos, setTodos] = useState<Todo[]>(agent.todos);
   const [showTasks, setShowTasks] = useState(true);
   const [compacting, setCompacting] = useState(false);
+  /** What a long-running command is doing ("Benchmarking"), shown instead of the spinner verb. */
+  const [activity, setActivity] = useState<string | undefined>();
   const [startedAt, setStartedAt] = useState(0);
   const [now, setNow] = useState(Date.now());
   const [pending, setPending] = useState<{ req: PermissionRequest; resolve(a: AskAnswer): void } | undefined>();
@@ -215,6 +219,10 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
               flush();
               push({ kind: "info", text: `⚓ ${ev.text}`, tone: ev.tone === "info" ? "info" : ev.tone });
               break;
+            case "notice":
+              flush();
+              push({ kind: "info", text: ev.text, tone: ev.tone });
+              break;
             case "retry":
               push({ kind: "info", text: `Stream interrupted (${ev.reason}); retrying…`, tone: "warn" });
               break;
@@ -309,9 +317,29 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     },
     setContextLength: setContextLength
       ? async (tokens) => {
-          const r = await setContextLength(tokens);
+          const r = await setContextLength(tokens, (text) => push({ kind: "info", text }));
           setUsageTick((n) => n + 1);
           return r;
+        }
+      : undefined,
+    bench: bench
+      ? async (specs) => {
+          const ac = new AbortController();
+          abortRef.current = ac;
+          setBusy(true);
+          setActivity("Benchmarking");
+          setStartedAt(Date.now());
+          setNow(Date.now());
+          try {
+            const table = await bench(specs, (text) => push({ kind: "info", text }), ac.signal);
+            push({ kind: "info", text: ac.signal.aborted ? `Benchmark interrupted. Results so far:\n${table}` : table });
+          } catch (err) {
+            push({ kind: "info", text: err instanceof Error ? err.message : String(err), tone: "error" });
+          } finally {
+            abortRef.current = undefined;
+            setBusy(false);
+            setActivity(undefined);
+          }
         }
       : undefined,
     compact: (focus) => runStream((signal) => agent.compact({ ...(focus ? { focus } : {}), signal, reason: "manual" })),
@@ -454,7 +482,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
         <Box marginTop={1}>
           <Text color={t.accent}>{t.spinner[Math.floor(now / 120) % t.spinner.length]} </Text>
           <Text dimColor>
-            {compacting ? "Compacting the conversation" : running.length ? `Running ${running.map((r) => r.name).join(", ")}` : liveText ? "Writing" : verb}… (
+            {compacting ? "Compacting the conversation" : activity ? activity : running.length ? `Running ${running.map((r) => r.name).join(", ")}` : liveText ? "Writing" : verb}… (
             {formatElapsed(now - startedAt)} · esc to interrupt)
           </Text>
         </Box>

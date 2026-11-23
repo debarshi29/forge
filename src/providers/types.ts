@@ -89,6 +89,21 @@ export interface StreamRequest {
   signal?: AbortSignal;
 }
 
+/** A request whose reply must be JSON matching `schema` (structured output). */
+export interface JsonRequest {
+  model: string;
+  system: string;
+  messages: Message[];
+  schema: Record<string, unknown>;
+  maxTokens?: number;
+  signal?: AbortSignal;
+}
+
+export interface JsonResult {
+  value: unknown;
+  usage: Usage;
+}
+
 export interface ProviderCapabilities {
   thinking: boolean;
   caching: boolean;
@@ -100,4 +115,6 @@ export interface Provider {
   readonly name: string;
   capabilities(model: string): ProviderCapabilities;
   stream(req: StreamRequest): AsyncIterable<StreamEvent>;
+  /** Schema-constrained JSON output, where the provider can guarantee it. */
+  generateJson?(req: JsonRequest): Promise<JsonResult>;
 }

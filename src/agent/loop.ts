@@ -17,11 +17,31 @@ import { toToolSpec } from "../tools/registry.js";
 import { formatTodos, type Todo } from "../tools/todo.js";
 import { chooseCut, estimateMessages, estimateTokens, shrinkToolResults, summarize, summaryMessage } from "./compact.js";
 import { costOf } from "./cost.js";
+import { diagnosticsNote, runDiagnostics, type DiagnosticsOptions } from "./diagnostics.js";
+import { repairToolInput } from "./repair.js";
+import { canonicalToolName } from "../providers/toolNames.js";
 import { appendUser } from "./history.js";
 import { ToolError, type Tool, type ToolContext, type ToolResult } from "../tools/types.js";
 
 export const MAX_TOOL_OUTPUT = 30_000;
 const MAX_STREAM_RETRIES = 2;
+/** How many times one prompt may be nudged to continue after a stalled reply. */
+const MAX_NUDGES = 2;
+const STALL_NUDGE =
+  "Your last message said what you would do next but didn't do it. If the task isn't finished, call the tool for that step now. If it is finished, say so briefly.";
+
+/**
+ * Does a reply read like it was about to act ("Let's update main.js:",
+ * "Now I'll run the tests.") rather than a final answer?
+ */
+export function looksUnfinished(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (/:\s*$/.test(t)) return true;
+  const last = t.split(/\n\s*\n/).at(-1)!.trim();
+  return /^(now,?\s+|next,?\s+|first,?\s+|then,?\s+)?(let's|let me|i'll|i will|i'm going to|we'll|we will|we need to)\b/i.test(last) && !/\?\s*$/.test(last);
+}
+
 /** How many times a Stop hook may send the model back to work in one prompt. */
 const MAX_STOP_HOOK_CONTINUES = 3;
 
@@ -49,6 +69,7 @@ export type AgentEvent =
   | { type: "compact"; phase: "end"; before: number; after: number; summary: string }
   | { type: "compact"; phase: "error"; message: string }
   | { type: "todos"; todos: Todo[] }
+  | { type: "notice"; text: string; tone: "info" | "warn" | "error" }
   | { type: "done"; stop: StopReason | "aborted" | "blocked"; text: string; detail?: string };
 
 export interface AgentOptions {
@@ -69,6 +90,14 @@ export interface AgentOptions {
   autoCompact?: boolean;
   /** Fraction of the context window that triggers auto-compaction (default 0.8). */
   compactThreshold?: number;
+  /** A cheaper model for side work (summaries). Defaults to the main model. */
+  fast?: { provider: Provider; model: string };
+  /** Check files after write/edit and feed problems back (default on; false turns it off). */
+  diagnostics?: false | DiagnosticsOptions;
+  /** Remind the model to continue when a reply announces a step but calls no tool (default: local providers only). */
+  nudgeStalls?: boolean;
+  /** Re-ask for malformed tool arguments with schema-constrained output, where the provider supports it (default true). */
+  repairToolCalls?: boolean;
 }
 
 export interface Recorder {
@@ -127,6 +156,17 @@ export class Agent {
     this.opts.provider = provider;
     this.opts.model = model;
     if (system !== undefined) this.opts.system = system;
+  }
+
+  /** Use a cheaper model for summaries; undefined goes back to the main model. */
+  setFastModel(fast: { provider: Provider; model: string } | undefined): void {
+    this.opts.fast = fast;
+  }
+
+  /** "provider:model" of the model used for side work. */
+  get fastModelSpec(): string {
+    const f = this.opts.fast;
+    return f ? `${f.provider.name}:${f.model}` : this.modelSpec;
   }
 
   get system(): string {
@@ -223,16 +263,17 @@ export class Agent {
     const old = this.messages.slice(0, cut);
     let summary: string;
     try {
+      const side = this.opts.fast ?? { provider: this.opts.provider, model: this.opts.model };
       const r = await summarize({
-        provider: this.opts.provider,
-        model: this.opts.model,
+        provider: side.provider,
+        model: side.model,
         messages: old,
         contextWindow: this.contextWindow,
         ...(opts.focus ? { focus: opts.focus } : {}),
         signal,
       });
       summary = r.summary;
-      this.addUsage(r.usage, false);
+      this.addUsage(r.usage, false, `${side.provider.name}:${side.model}`);
     } catch (err) {
       if (signal.aborted) {
         yield { type: "compact", phase: "error", message: "Compaction interrupted; the conversation is unchanged." };
@@ -246,6 +287,11 @@ export class Agent {
     // If the kept turns are still too big on their own, trim their tool output too.
     const kept = shrinkToolResults(this.messages.slice(cut), Math.floor(this.contextWindow * 0.25));
     const next = [summaryMessage(summary, { files, ...(todos ? { todos } : {}) }), ...kept];
+    // Auto-compaction only helps if the result is smaller than what triggered it.
+    if (auto && estimateMessages(next) >= estimateMessages(this.messages)) {
+      yield { type: "compact", phase: "error", message: "Compacting wouldn't make the conversation smaller (the latest turns are what's big), so it is unchanged." };
+      return "failed";
+    }
     this.messages.length = 0;
     this.messages.push(...next);
     // File contents are gone from context: make edits read the file again first.
@@ -281,8 +327,8 @@ export class Agent {
     else if (this.lastPromptMode === "plan") extra.push(reminder(PLAN_ENDED));
     this.lastPromptMode = mode;
     this.pushUser([...blocks, ...extra]);
-    const toolSpecs = this.opts.tools.map(toToolSpec);
     let stopHookRuns = 0;
+    let nudges = 0;
 
     let compactedThisTurn = 0;
     while (true) {
@@ -302,7 +348,7 @@ export class Agent {
             model: this.opts.model,
             system: this.opts.system,
             messages: this.messages,
-            tools: toolSpecs,
+            tools: this.requestTools(),
             maxTokens: this.opts.maxTokens,
             signal,
           })) {
@@ -337,6 +383,13 @@ export class Agent {
 
       if (end.stop === "pause" && toolUses.length === 0) continue; // server asked us to resume
       if (end.stop === "refusal" || toolUses.length === 0) {
+        // Small models often announce the next step ("Now let's update main.js:") and stop.
+        if (end.stop === "end_turn" && this.nudgesStalls && nudges < MAX_NUDGES && looksUnfinished(text) && !signal.aborted) {
+          nudges++;
+          yield { type: "notice", text: "The model stopped mid-task; Forge asked it to carry on.", tone: "info" };
+          this.pushUser([reminder(STALL_NUDGE)]);
+          continue;
+        }
         if (end.stop !== "refusal" && this.opts.hooks?.has("Stop") && !signal.aborted) {
           const o = await this.opts.hooks.run({ ...this.hookBase("Stop"), stop_hook_active: stopHookRuns > 0 }, signal);
           yield* hookWarnings("Stop", o.warnings);
@@ -361,7 +414,28 @@ export class Agent {
       } else {
         results = yield* this.runTools(toolUses, signal);
       }
-      this.pushUser(results);
+      const extraBlocks: Block[] = [];
+      if (!signal.aborted && this.opts.diagnostics !== false) {
+        const changed = toolUses.flatMap((t, i) => {
+          const name = this.findTool(t.name)?.name;
+          const input = t.input as { path?: unknown };
+          return (name === "write" || name === "edit") && !results[i]?.isError && typeof input?.path === "string"
+            ? [path.resolve(this.toolCtx.cwd, input.path)]
+            : [];
+        });
+        if (changed.length) {
+          try {
+            const report = await runDiagnostics(this.opts.root, changed, this.opts.diagnostics || {}, signal);
+            if (report.count) {
+              extraBlocks.push(reminder(diagnosticsNote(report)));
+              yield { type: "notice", text: `Checks found ${report.count} problem${report.count === 1 ? "" : "s"} after the edit (${report.checks.filter((c) => report.text.includes(c)).join(", ")}); Forge will see them.`, tone: "warn" };
+            }
+          } catch (err) {
+            if (!signal.aborted) yield { type: "notice", text: `Couldn't check the edited files: ${err instanceof Error ? err.message : String(err)}`, tone: "warn" };
+          }
+        }
+      }
+      this.pushUser([...results, ...extraBlocks]);
       if (signal.aborted) {
         yield { type: "done", stop: "aborted", text };
         return;
@@ -371,6 +445,19 @@ export class Agent {
 
   private async *runTools(calls: ToolUseBlock[], signal: AbortSignal): AsyncGenerator<AgentEvent, ToolResultBlock[]> {
     const results = new Map<string, ToolResultBlock>();
+    // A write or edit of a file read in this same reply is blind: the model
+    // hasn't seen the contents yet (small models do this and clobber files).
+    const readHere = new Set<string>();
+    const blind = new Set<string>();
+    for (const call of calls) {
+      const name = this.findTool(call.name)?.name;
+      const p = (call.input as { path?: unknown } | null)?.path;
+      if (typeof p !== "string") continue;
+      const abs = path.resolve(this.toolCtx.cwd, p).toLowerCase();
+      if (name === "read") readHere.add(abs);
+      // Edits are safe blind (old_string must match); a blind write can clobber the file.
+      else if (name === "write" && readHere.has(abs)) blind.add(call.id);
+    }
     // Consecutive read-only calls run in parallel; mutating calls run one at a time.
     const batches: ToolUseBlock[][] = [];
     for (const call of calls) {
@@ -387,20 +474,30 @@ export class Agent {
         events.push({
           type: "tool_start",
           id: call.id,
-          name: call.name,
+          name: tool?.name ?? call.name,
           input: call.input,
           summary: safeSummary(tool, call.input),
         });
       }
       yield* events;
       const notices: AgentEvent[] = [];
-      const done = await Promise.all(batch.map((call) => this.runOne(call, signal, notices)));
+      const done = await Promise.all(
+        batch.map((call) =>
+          blind.has(call.id)
+            ? Promise.resolve<ToolResult>({
+                content: `Not run: you read this file in the same reply, so you haven't seen its contents yet. Look at the read result, then make the change.`,
+                isError: true,
+              })
+            : this.runOne(call, signal, notices),
+        ),
+      );
       yield* notices;
       for (const [i, result] of done.entries()) {
         const call = batch[i]!;
         results.set(call.id, toResultBlock(call.id, result));
-        yield { type: "tool_end", id: call.id, name: call.name, result };
-        if (call.name === "todo_write" && !result.isError) {
+        const name = this.findTool(call.name)?.name ?? call.name;
+        yield { type: "tool_end", id: call.id, name, result };
+        if (name === "todo_write" && !result.isError) {
           this.opts.recorder?.todos?.(this.todoState.items);
           yield { type: "todos", todos: this.todoState.items };
         }
@@ -415,14 +512,35 @@ export class Agent {
     const tool = this.findTool(call.name);
     if (!tool) return { content: `Unknown tool "${call.name}"`, isError: true };
 
-    const parsed = tool.schema.safeParse(call.input);
+    let parsed = tool.schema.safeParse(call.input);
     if (!parsed.success) {
-      return {
-        content: `Invalid input for ${call.name}: ${parsed.error.issues
-          .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-          .join("; ")}. Raw input: ${truncate(JSON.stringify(call.input), 2000)}`,
-        isError: true,
-      };
+      const problems = parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`);
+      // Small models often get the arguments almost right: ask again with output constrained to the schema.
+      if ((this.opts.repairToolCalls ?? true) && this.opts.provider.generateJson && !signal.aborted) {
+        const fixed = await repairToolInput({
+          provider: this.opts.provider,
+          model: this.opts.model,
+          tool: toToolSpec(tool),
+          input: call.input,
+          errors: problems.join("\n"),
+          context: this.intentContext(),
+          signal,
+        });
+        if (fixed) {
+          this.addUsage(fixed.usage, false);
+          const re = tool.schema.safeParse(fixed.input);
+          if (re.success) {
+            parsed = re;
+            notices.push({ type: "notice", text: `Fixed malformed arguments for ${tool.name}.`, tone: "info" });
+          }
+        }
+      }
+      if (!parsed.success) {
+        return {
+          content: `Invalid input for ${tool.name}: ${problems.join("; ")}. Raw input: ${truncate(JSON.stringify(call.input), 2000)}`,
+          isError: true,
+        };
+      }
     }
 
     let input: unknown = parsed.data;
@@ -484,12 +602,42 @@ export class Agent {
     return result;
   }
 
+  /** Tools offered on the next request: exit_plan_mode only while plan mode is on. */
+  private requestTools(): ToolSpec[] {
+    const plan = this.opts.permissions.mode === "plan";
+    return this.opts.tools.filter((t) => plan || t.name !== "exit_plan_mode").map(toToolSpec);
+  }
+
+  /** Local providers get nudged when they stop mid-task; cloud models don't need it. */
+  private get nudgesStalls(): boolean {
+    return this.opts.nudgeStalls ?? ["ollama", "lmstudio"].includes(this.opts.provider.name);
+  }
+
   private hookBase(event: HookEvent) {
     return { hook_event_name: event, cwd: this.toolCtx.shell.cwd, permission_mode: this.opts.permissions.mode };
   }
 
   private findTool(name: string): Tool | undefined {
-    return this.opts.tools.find((t) => t.name === name);
+    const exact = this.opts.tools.find((t) => t.name === name);
+    if (exact) return exact;
+    const canonical = canonicalToolName(name, new Set(this.opts.tools.map((t) => t.name)));
+    return canonical ? this.opts.tools.find((t) => t.name === canonical) : undefined;
+  }
+
+  /** The latest user request and the assistant's text since, to explain a tool call's intent. */
+  private intentContext(): string {
+    const parts: string[] = [];
+    for (let i = this.messages.length - 1; i >= 0 && parts.length < 2; i--) {
+      const m = this.messages[i]!;
+      const text = m.content.flatMap((b) => (b.type === "text" && !isReminder(b.text) ? [b.text] : [])).join("\n").trim();
+      if (!text) continue;
+      if (m.role === "assistant" && parts.length === 0) parts.push(`Assistant: ${text}`);
+      else if (m.role === "user") {
+        parts.push(`User: ${text}`);
+        break;
+      }
+    }
+    return parts.reverse().join("\n\n");
   }
 
   private isReadOnly(call: ToolUseBlock): boolean {
@@ -502,9 +650,9 @@ export class Agent {
   }
 
   /** Count usage; `measures` = false for side requests (summaries) that don't reflect the context size. */
-  private addUsage(u: Usage, measures = true): void {
-    this.costUSD += costOf(this.modelSpec, u) ?? 0;
-    this.opts.recorder?.usage(this.modelSpec, u, !measures);
+  private addUsage(u: Usage, measures = true, spec = this.modelSpec): void {
+    this.costUSD += costOf(spec, u) ?? 0;
+    this.opts.recorder?.usage(spec, u, !measures);
     this.usage.inputTokens += u.inputTokens;
     this.usage.outputTokens += u.outputTokens;
     this.usage.cacheReadTokens = (this.usage.cacheReadTokens ?? 0) + (u.cacheReadTokens ?? 0);
