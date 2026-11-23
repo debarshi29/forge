@@ -1,5 +1,7 @@
 # Forge
 
+[![CI](https://github.com/debarshi29/forge/actions/workflows/ci.yml/badge.svg)](https://github.com/debarshi29/forge/actions/workflows/ci.yml)
+
 A from-scratch terminal coding agent in the spirit of Claude Code and Codex CLI: a streaming REPL where an LLM reads, edits, and runs code in your project through tools, gated by permissions.
 
 - **Provider-agnostic:** Anthropic Claude (first-class), Google Gemini, OpenAI, and Ollama / OpenAI-compatible local models.
@@ -329,6 +331,14 @@ pnpm typecheck
 pnpm test
 pnpm build      # dist/cli.js
 ```
+
+CI (`.github/workflows/ci.yml`) runs the typecheck, tests, build and a CLI smoke test on Ubuntu and Windows with
+Node 22 and 24 for every push to `main` and every pull request.
+
+To release: bump `version` in `package.json`, merge it, then push a matching tag (`git tag v0.2.0 && git push origin
+v0.2.0`). The release workflow checks the tag against the version, runs the checks again, and creates a GitHub
+release with the packed `.tgz`. It also publishes to npm if the repository has an `NPM_TOKEN` secret (the name `forge`
+is taken on npm, so rename the package first).
 
 ## License
 

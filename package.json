@@ -6,6 +6,10 @@
   "bin": {
     "forge": "dist/cli.js"
   },
+  "files": [
+    "dist"
+  ],
+  "packageManager": "pnpm@12.18.0",
   "scripts": {
     "dev": "tsx src/cli.ts",
     "build": "tsup src/cli.ts --format esm --target node22 --clean",
