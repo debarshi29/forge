@@ -25,6 +25,10 @@ import { runGoal, type GoalOptions } from "./agent/goal.js";
 import { parseCommand, type CommandContext } from "./commands/index.js";
 import type { Block } from "./providers/types.js";
 import { makeTaskTool } from "./tools/task.js";
+import { expandTemplate, extensionDirs, loadCustomCommands, loadPlugins, loadSkills, makeSkillTool, skillsSection } from "./agent/extensions.js";
+import { McpManager } from "./mcp/index.js";
+import { registerCommands } from "./commands/index.js";
+import type { HooksConfig } from "./hooks/index.js";
 import type { ProviderSettings } from "./providers/registry.js";
 import { defaultTools } from "./tools/registry.js";
 import { App, type AskBridge, type PetSettings } from "./ui/App.js";
@@ -95,7 +99,45 @@ const program = new Command()
       }
     }
     const warnings = [resolved.warning, fastWarning].filter((w): w is string => Boolean(w));
-    const agentTypes = loadAgentTypes(root);
+    // Plugins bundle commands, agents, skills, hooks and MCP servers.
+    const { plugins, errors: pluginErrors } = loadPlugins(root);
+    warnings.push(...pluginErrors.map((e) => `Skipped a plugin: ${e}`));
+    const agentTypes = loadAgentTypes(root, process.env, plugins.map((p) => path.join(p.dir, "agents")));
+    const customCommands = loadCustomCommands(extensionDirs(root, "commands", plugins));
+    const taken = registerCommands(
+      customCommands.map((c) => ({
+        name: c.name,
+        ...(c.args ? { args: c.args } : {}),
+        description: c.description,
+        custom: true,
+        async run(args: string, ctx: CommandContext) {
+          if (ctx.busy) return ctx.print("Wait for the current turn to finish first.", "warn");
+          if (!ctx.sendPrompt) return ctx.print("This command isn't available here.", "warn");
+          await ctx.sendPrompt(expandTemplate(c.template, args));
+        },
+      })),
+    );
+    warnings.push(...taken.map((n) => `The custom command /${n} has the same name as a built-in one, so it was skipped.`));
+    const skills = loadSkills(extensionDirs(root, "skills", plugins));
+    warnings.push(...skills.errors.map((e) => `Skipped a skill: ${e}`));
+    const promptExtra = skillsSection(skills.skills);
+    const hooksConfig: HooksConfig = { ...config.hooks };
+    for (const p of plugins) {
+      for (const [event, list] of Object.entries(p.hooks) as Array<[keyof HooksConfig, NonNullable<HooksConfig[keyof HooksConfig]>]>) {
+        hooksConfig[event] = [...(hooksConfig[event] ?? []), ...list];
+      }
+    }
+    const mcp = new McpManager(Object.assign({}, ...plugins.map((p) => p.mcpServers), config.mcpServers), root);
+    const extensionsInfo = {
+      describe: () => {
+        const parts = [
+          plugins.length ? `Plugins:\n${plugins.map((p) => `  ${p.name}${p.description ? `: ${p.description}` : ""}\n    ${p.dir}`).join("\n")}` : "Plugins: none (add folders to ~/.forge/plugins/ or .forge/plugins/)",
+          skills.skills.length ? `Skills:\n${skills.skills.map((s) => `  ${s.name}: ${s.description}`).join("\n")}` : "Skills: none (add <name>/SKILL.md under ~/.forge/skills/ or .forge/skills/)",
+          customCommands.length ? `Custom commands:\n${customCommands.map((c) => `  /${c.name}  ${c.source}`).join("\n")}` : "Custom commands: none (add <name>.md under ~/.forge/commands/ or .forge/commands/)",
+        ];
+        return parts.join("\n\n");
+      },
+    };
     warnings.push(...agentTypes.errors.map((e) => `Skipped an agent file: ${e}`));
 
     const headless = flags.print !== undefined;
@@ -128,16 +170,16 @@ const program = new Command()
     }
 
     const memory = loadMemory(root);
-    const tools = [...defaultTools(), makeTaskTool(agentTypes.types)];
+    const tools = [...defaultTools(), makeTaskTool(agentTypes.types), ...(skills.skills.length ? [makeSkillTool(skills.skills)] : [])];
     const agent = new Agent({
       provider,
       model,
-      system: buildSystemPrompt({ root, cwd: root, model: resolved.spec, memory }),
+      system: buildSystemPrompt({ root, cwd: root, model: resolved.spec, memory, extra: promptExtra }),
       tools,
       permissions: new Permissions(config.permissionMode, ask, { rules: config.permissions, root, saveRule: (rule) => addProjectAllowRule(root, rule) }),
       root,
       maxTokens: config.maxTokens,
-      hooks: new Hooks(config.hooks, root),
+      hooks: new Hooks(hooksConfig, root),
       autoCompact: config.autoCompact,
       compactThreshold: config.compactThreshold,
       ...(fast ? { fast } : {}),
@@ -179,6 +221,11 @@ const program = new Command()
     }
     if (!headless) for (const w of warnings) initialItems = [...(initialItems ?? []), { kind: "info", text: `⚠ ${w}`, tone: "warn" }];
 
+    if (flags.print !== undefined && mcp.count) {
+      // Headless: wait for MCP servers so their tools are there from the first request.
+      await mcp.start(tools);
+      for (const s of mcp.status) if (s.state === "failed") process.stderr.write(`\x1b[33m⚠ MCP server ${s.name} failed: ${s.error}\x1b[0m\n`);
+    }
     if (flags.print !== undefined) {
       // Git Bash rewrites a leading "/usage" into "C:/Program Files/Git/usage"; undo that for slash commands.
       flags.print = flags.print.replace(/^[A-Za-z]:[\\/]Program Files[\\/]Git[\\/](?=[a-z][\w-]*(\s|$))/i, "/");
@@ -199,6 +246,8 @@ const program = new Command()
           exit: () => {},
           allowBypass: config.permissionMode === "bypass",
           memory,
+          mcp,
+          extensions: extensionsInfo,
           sendPrompt: async (p) => {
             ran = true;
             ok = await runPrompt(agent, p, flags.output);
@@ -219,6 +268,7 @@ const program = new Command()
         ok = await runPrompt(agent, flags.print, flags.output, goal ? { goal, root } : undefined);
       }
       rl?.close();
+      await mcp.close();
       process.exitCode = ok ? 0 : 1;
       return;
     }
@@ -241,10 +291,12 @@ const program = new Command()
         memory,
         switchModel: async (spec: string) => {
           const next = await resolveModelForUse(spec, providerSettings);
-          agent.setModel(next.provider, next.model, buildSystemPrompt({ root, cwd: root, model: next.spec, memory }));
+          agent.setModel(next.provider, next.model, buildSystemPrompt({ root, cwd: root, model: next.spec, memory, extra: promptExtra }));
           return next.warning ? { warning: next.warning } : undefined;
         },
         listModels: () => listModelOptions(providerSettings),
+        mcp,
+        extensions: extensionsInfo,
         ...(config.statusLine ? { statusLine: makeStatusLine(config.statusLine, root) } : {}),
         setContextLength: async (requested: number | "auto" | undefined, progress?: (text: string) => void) => {
           if (!agent.modelSpec.startsWith("ollama:")) {
@@ -263,7 +315,7 @@ const program = new Command()
             else lengths[base] = tokens;
             providerSettings.ollama = { ...providerSettings.ollama, contextLengths: lengths };
             const next = await resolveModelForUse(`ollama:${base}`, providerSettings);
-            agent.setModel(next.provider, next.model, buildSystemPrompt({ root, cwd: root, model: next.spec, memory }));
+            agent.setModel(next.provider, next.model, buildSystemPrompt({ root, cwd: root, model: next.spec, memory, extra: promptExtra }));
             try {
               saveOllamaContextLength(base, tokens);
             } catch {
@@ -337,7 +389,21 @@ const program = new Command()
     );
     // Never leave the terminal in mouse-reporting mode, however we exit.
     process.once("exit", () => process.stdout.write(MOUSE_OFF));
+    if (mcp.count) {
+      // Connect in the background; tools appear as each server comes up.
+      const pending: Array<[string, "info" | "warn"]> = [];
+      const say = (text: string, tone: "info" | "warn") => (bridge.notify ? bridge.notify(text, tone) : pending.push([text, tone]));
+      const flushTimer = setInterval(() => {
+        while (bridge.notify && pending.length) bridge.notify(...pending.shift()!);
+      }, 200);
+      void mcp
+        .start(tools, (s) =>
+          say(s.state === "connected" ? `MCP server ${s.name} connected (${s.tools.length} tool${s.tools.length === 1 ? "" : "s"}).` : `MCP server ${s.name} failed: ${s.error}`, s.state === "connected" ? "info" : "warn"),
+        )
+        .finally(() => setTimeout(() => clearInterval(flushTimer), 2000));
+    }
     await app.waitUntilExit();
+    await mcp.close();
     input.dispose();
   });
 

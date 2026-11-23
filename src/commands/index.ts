@@ -11,6 +11,7 @@ import { parseGoalArgs, type GoalOptions } from "../agent/goal.js";
 import { branchTree } from "../agent/fork.js";
 import { ciGoal, commitPrompt, GitError, prPrompt, reviewPrompt } from "./git.js";
 import type { Block } from "../providers/types.js";
+import { reminder } from "../agent/loop.js";
 
 export interface CommandContext {
   agent: Agent;
@@ -55,6 +56,10 @@ export interface CommandContext {
   fork?(opts: { worktree?: boolean }): Promise<string>;
   /** Open the rewind picker (Esc Esc). */
   openRewind?(): void;
+  /** MCP servers (for /mcp). */
+  mcp?: { describe(): string };
+  /** Plugins, skills and custom commands (for /plugins). */
+  extensions?: { describe(): string };
   /** Send a prompt to the model as a turn (commands like /commit build one). */
   sendPrompt?(prompt: string | Block[]): Promise<void>;
   /** Work on a goal across turns (/goal). */
@@ -262,6 +267,42 @@ export const COMMANDS: SlashCommand[] = [
       const specs = args.split(/\s+/).filter(Boolean);
       ctx.print(`Benchmarking ${specs.length ? specs.join(", ") : "the installed Ollama models"} on 5 tasks, each in a throwaway folder. This takes a few minutes; Esc stops it.`);
       await ctx.bench(specs);
+    },
+  },
+  {
+    name: "mcp",
+    description: "Show MCP servers, whether they connected, and their tools",
+    run(_a, ctx) {
+      ctx.print(ctx.mcp ? `MCP servers:\n${ctx.mcp.describe()}` : 'No MCP servers configured. Add them under "mcpServers" in settings.');
+    },
+  },
+  {
+    name: "plugins",
+    description: "List plugins, skills and custom commands that are loaded",
+    run(_a, ctx) {
+      ctx.print(ctx.extensions?.describe() ?? "No plugins, skills or custom commands.");
+    },
+  },
+  {
+    name: "init",
+    description: "Write an AGENTS.md for this project: commands, layout and conventions",
+    async run(_a, ctx) {
+      if (ctx.busy) return ctx.print("Wait for the current turn to finish first.", "warn");
+      if (!ctx.sendPrompt) return ctx.print("This command isn't available here.", "warn");
+      await ctx.sendPrompt([
+        { type: "text", text: "/init" },
+        reminder(`Write an AGENTS.md at the project root for future coding agents (and people) working here. If AGENTS.md or FORGE.md already exists, improve it instead of starting over, keeping what is still right.
+
+Investigate first: repo_map, the README, package/build files (package.json, pyproject.toml, Cargo.toml, go.mod, Makefile, …), CI config, and a few representative source files.
+
+Then write a concise file (aim for under 80 lines) with:
+- How to build, test (including running a single test), lint and run the project: the exact commands.
+- The architecture in a few bullets: the main directories and what lives where, and how the pieces fit together.
+- Conventions that aren't obvious from one file: code style, error handling, naming, testing patterns, anything the project does differently.
+- Gotchas you noticed (generated files not to edit, required environment variables, platform quirks).
+
+Don't list every file, don't repeat generic advice ("write clean code"), and don't invent commands you haven't seen in the project. Say briefly what you wrote when done.`),
+      ]);
     },
   },
   {
@@ -640,6 +681,21 @@ export function parseContextSize(s: string): number | undefined {
 }
 
 /** Commands for the slash menu: name-prefix matches first, then names containing the text. */
+/** Add commands (custom ones from .forge/commands); names already taken are skipped and returned. */
+export function registerCommands(cmds: SlashCommand[]): string[] {
+  const skipped: string[] = [];
+  for (const c of cmds) {
+    const at = COMMANDS.findIndex((x) => x.name === c.name);
+    if (at !== -1 && !(COMMANDS[at] as SlashCommand & { custom?: boolean }).custom) {
+      skipped.push(c.name);
+      continue;
+    }
+    if (at !== -1) COMMANDS.splice(at, 1);
+    COMMANDS.push(c);
+  }
+  return skipped;
+}
+
 export function matchCommands(prefix: string): SlashCommand[] {
   const p = prefix.replace(/^\//, "").split(/\s/)[0]!.toLowerCase();
   const starts = COMMANDS.filter((c) => c.name.startsWith(p));

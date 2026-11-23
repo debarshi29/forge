@@ -8,6 +8,8 @@ export interface PromptEnv {
   model: string;
   date?: Date;
   memory?: MemoryFile[];
+  /** Appended sections (available skills). */
+  extra?: string;
 }
 
 const BASE = `You are Forge, a coding agent working in the user's project from their terminal. You read, edit and run code with the tools provided, and you finish the task you are given.
@@ -56,5 +58,5 @@ ${memory.map((m) => `\n## ${m.path} (${m.scope})\n\n${m.content}`).join("\n")}`
 - Platform: ${process.platform}
 - Shell used by the bash tool: ${shell.kind === "bash" ? (process.platform === "win32" ? "Git Bash (use bash syntax, not cmd; drives are /c/, /d/…)" : "bash") : "Windows PowerShell 5.1 (use PowerShell syntax, not cmd)"}
 - Model: ${env.model}
-- Today's date: ${date}${memorySection}`;
+- Today's date: ${date}${memorySection}${env.extra ?? ""}`;
 }

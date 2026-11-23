@@ -71,6 +71,22 @@ const SettingsSchema = z
     permissions: z.object({ allow: RuleList, deny: RuleList, ask: RuleList }).partial(),
     /** Shell commands run around tool calls, prompts and stops. */
     hooks: HooksSchema,
+    /** MCP servers: name → { command, args, env } or { url, headers }. */
+    mcpServers: z.record(
+      z.string().regex(/^[A-Za-z0-9_-]+$/, "use letters, digits, _ and - in server names"),
+      z
+        .object({
+          command: z.string().min(1),
+          args: z.array(z.string()),
+          env: z.record(z.string(), z.string()),
+          cwd: z.string(),
+          url: z.string().url(),
+          headers: z.record(z.string(), z.string()),
+          timeout: z.number().positive(),
+        })
+        .partial()
+        .refine((s) => Boolean(s.command) !== Boolean(s.url), 'give either "command" or "url"'),
+    ),
   })
   .partial();
 
@@ -104,6 +120,8 @@ export interface Config {
   permissions: { allow: string[]; deny: string[]; ask: string[] };
   /** Hooks from every settings file, concatenated per event. */
   hooks: HooksConfig;
+  /** MCP servers from every settings file (a project entry replaces a user one with the same name). */
+  mcpServers: Record<string, { command?: string; args?: string[]; env?: Record<string, string>; cwd?: string; url?: string; headers?: Record<string, string>; timeout?: number }>;
   /** Files that were loaded, lowest precedence first. */
   sources: string[];
 }
@@ -159,6 +177,7 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
         if (list.length) hooks[e] = list;
       }
       next.hooks = hooks;
+      next.mcpServers = { ...merged.mcpServers, ...s.mcpServers };
       merged = next;
     }
   }
@@ -192,6 +211,7 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
       ask: merged.permissions?.ask ?? [],
     },
     hooks: merged.hooks ?? {},
+    mcpServers: merged.mcpServers ?? {},
     sources,
   };
 }
