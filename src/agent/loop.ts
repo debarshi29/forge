@@ -20,6 +20,8 @@ import { costOf } from "./cost.js";
 import { diagnosticsNote, runDiagnostics, type DiagnosticsOptions } from "./diagnostics.js";
 import { repairToolInput } from "./repair.js";
 import { canonicalToolName } from "../providers/toolNames.js";
+import { BUILTIN_AGENTS, subagentSystem, toolsFor, type AgentType } from "./subagents.js";
+import type { SubagentRequest } from "../tools/types.js";
 import { appendUser } from "./history.js";
 import { ToolError, type Tool, type ToolContext, type ToolResult } from "../tools/types.js";
 
@@ -70,6 +72,7 @@ export type AgentEvent =
   | { type: "compact"; phase: "error"; message: string }
   | { type: "todos"; todos: Todo[] }
   | { type: "notice"; text: string; tone: "info" | "warn" | "error" }
+  | { type: "tool_progress"; id: string; text: string }
   | { type: "done"; stop: StopReason | "aborted" | "blocked"; text: string; detail?: string };
 
 export interface AgentOptions {
@@ -94,6 +97,10 @@ export interface AgentOptions {
   fast?: { provider: Provider; model: string };
   /** Check files after write/edit and feed problems back (default on; false turns it off). */
   diagnostics?: false | DiagnosticsOptions;
+  /** Subagent types the task tool can start (default: the built-in ones). */
+  agentTypes?: AgentType[];
+  /** Resolve a "provider:model" spec for subagents with their own model. */
+  resolveModel?(spec: string): Promise<{ provider: Provider; model: string }>;
   /** Remind the model to continue when a reply announces a step but calls no tool (default: local providers only). */
   nudgeStalls?: boolean;
   /** Re-ask for malformed tool arguments with schema-constrained output, where the provider supports it (default true). */
@@ -124,6 +131,11 @@ export class Agent {
   /** messages.length when lastInputTokens was measured. */
   private measuredAt = 0;
   private readonly todoState: { items: Todo[] } = { items: [] };
+  private readonly bg = new Map<string, BackgroundTask>();
+  private bgCounter = 0;
+  /** Reminders for the model (finished background agents), sent with the next request. */
+  private notes: Block[] = [];
+  private bgListeners = new Set<(task: BackgroundTask) => void>();
 
   constructor(private opts: AgentOptions) {
     this.messages = opts.messages ?? [];
@@ -135,7 +147,137 @@ export class Agent {
       shell: { cwd },
       approvePlan: (plan) => this.opts.permissions.approvePlan(plan),
       todos: this.todoState,
+      runSubagent: (req, ctx) => this.runSubagent(req, ctx),
     };
+  }
+
+  /** Subagent types available to the task tool. */
+  get agentTypes(): AgentType[] {
+    return this.opts.agentTypes ?? BUILTIN_AGENTS;
+  }
+
+  /** Background agents started this session, oldest first. */
+  get backgroundTasks(): BackgroundTask[] {
+    return [...this.bg.values()];
+  }
+
+  /** Called when a background agent finishes (the UI uses it to resume). */
+  onBackgroundDone(fn: (task: BackgroundTask) => void): () => void {
+    this.bgListeners.add(fn);
+    return () => this.bgListeners.delete(fn);
+  }
+
+  /** Stop a running background agent; false if there is none with that id. */
+  stopBackground(id: string): boolean {
+    const t = this.bg.get(id);
+    if (!t || t.status !== "running") return false;
+    t.controller.abort();
+    return true;
+  }
+
+  /** Results waiting to be shown to the model. */
+  get pendingNotes(): number {
+    return this.notes.length;
+  }
+
+  /** Resolves when no background agent is running. */
+  async waitForBackground(): Promise<void> {
+    await Promise.all([...this.bg.values()].map((t) => t.done));
+  }
+
+  private takeNotes(): Block[] {
+    const n = this.notes;
+    this.notes = [];
+    return n;
+  }
+
+  /** Run a subagent for the task tool: in the foreground (its report is the result) or the background. */
+  private async runSubagent(req: SubagentRequest, ctx: ToolContext): Promise<ToolResult> {
+    const type = this.agentTypes.find((t) => t.name === req.type) ?? BUILTIN_AGENTS.find((t) => t.name === "general")!;
+    let model: { provider: Provider; model: string };
+    try {
+      model = await this.subagentModel(type);
+    } catch (err) {
+      return { content: `Couldn't start the ${type.name} agent: ${err instanceof Error ? err.message : String(err)}`, isError: true };
+    }
+    const child = new Agent({
+      provider: model.provider,
+      model: model.model,
+      system: subagentSystem(this.opts.system, type),
+      tools: toolsFor(type, this.opts.tools),
+      permissions: this.opts.permissions,
+      root: this.opts.root,
+      cwd: this.toolCtx.shell.cwd,
+      ...(this.opts.maxTokens ? { maxTokens: this.opts.maxTokens } : {}),
+      ...(this.opts.hooks ? { hooks: this.opts.hooks } : {}),
+      ...(this.opts.autoCompact !== undefined ? { autoCompact: this.opts.autoCompact } : {}),
+      ...(this.opts.compactThreshold ? { compactThreshold: this.opts.compactThreshold } : {}),
+      ...(this.opts.fast ? { fast: this.opts.fast } : {}),
+      ...(this.opts.diagnostics !== undefined ? { diagnostics: this.opts.diagnostics } : {}),
+      ...(this.opts.repairToolCalls !== undefined ? { repairToolCalls: this.opts.repairToolCalls } : {}),
+      ...(this.opts.nudgeStalls !== undefined ? { nudgeStalls: this.opts.nudgeStalls } : {}),
+      // Its requests count toward this session's usage, as side requests.
+      recorder: { message() {}, usage: (spec, u) => this.opts.recorder?.usage(spec, u, true) },
+    });
+    if (!req.background) return this.driveChild(child, type, req, ctx.signal, ctx.progress);
+
+    const id = `agent-${++this.bgCounter}`;
+    const controller = new AbortController();
+    const task: BackgroundTask = { id, type: type.name, description: req.description, status: "running", startedAt: Date.now(), controller, done: Promise.resolve() };
+    task.done = this.driveChild(child, type, req, controller.signal, (text) => (task.activity = text)).then((r) => {
+      const text = typeof r.content === "string" ? r.content : "(no text)";
+      task.status = controller.signal.aborted ? "stopped" : r.isError ? "failed" : "done";
+      task.result = text;
+      this.notes.push(reminder(`Background agent ${id} (${type.name}: ${req.description}) ${task.status === "done" ? "finished" : task.status}. Its report:\n\n${text}`));
+      for (const fn of this.bgListeners) fn(task);
+    });
+    this.bg.set(id, task);
+    return { content: `Started background agent ${id} (${type.name}: ${req.description}). You'll get its report when it finishes; carry on with other work meanwhile.` };
+  }
+
+  private async subagentModel(type: AgentType): Promise<{ provider: Provider; model: string }> {
+    const spec = type.model?.trim();
+    if (!spec || spec === "inherit") return { provider: this.opts.provider, model: this.opts.model };
+    if (spec === "fast") return this.opts.fast ?? { provider: this.opts.provider, model: this.opts.model };
+    if (!this.opts.resolveModel) throw new Error(`can't resolve model "${spec}" here`);
+    return this.opts.resolveModel(spec);
+  }
+
+  private async driveChild(
+    child: Agent,
+    type: AgentType,
+    req: SubagentRequest,
+    signal: AbortSignal,
+    progress?: (text: string) => void,
+  ): Promise<ToolResult> {
+    let final = "";
+    let stop: string | undefined;
+    let calls = 0;
+    let failure: string | undefined;
+    try {
+      for await (const ev of child.send(req.prompt, signal)) {
+        if (ev.type === "tool_start") {
+          calls++;
+          progress?.(`${ev.name} ${ev.summary.split("\n")[0]}`);
+        } else if (ev.type === "done") {
+          final = ev.text;
+          stop = ev.stop;
+        }
+      }
+    } catch (err) {
+      failure = err instanceof Error ? err.message : String(err);
+    }
+    // Its tokens and cost belong to this session.
+    this.usage.inputTokens += child.usage.inputTokens;
+    this.usage.outputTokens += child.usage.outputTokens;
+    this.usage.cacheReadTokens = (this.usage.cacheReadTokens ?? 0) + (child.usage.cacheReadTokens ?? 0);
+    this.usage.cacheWriteTokens = (this.usage.cacheWriteTokens ?? 0) + (child.usage.cacheWriteTokens ?? 0);
+    this.costUSD += child.costUSD;
+    const stats = `[${type.name} agent: ${calls} tool call${calls === 1 ? "" : "s"}, ${child.usage.inputTokens + child.usage.outputTokens} tokens]`;
+    if (failure) return { content: `The subagent failed: ${failure}\n${stats}`, isError: true };
+    if (stop === "aborted") return { content: `The subagent was interrupted before it finished.\n${stats}`, isError: true };
+    const report = final.trim() || lastAssistantText(child.messages) || "(the subagent finished without a report)";
+    return { content: `${report}\n\n${stats}` };
   }
 
   /** Model id as the provider knows it. */
@@ -310,8 +452,9 @@ export class Agent {
   /** Run one user prompt to completion, yielding events for the UI. */
   async *send(prompt: string | Block[], signal: AbortSignal = new AbortController().signal): AsyncGenerator<AgentEvent> {
     const blocks: Block[] = typeof prompt === "string" ? [{ type: "text", text: prompt }] : prompt;
-    const extra: Block[] = [];
-    if (this.opts.hooks?.has("UserPromptSubmit")) {
+    // Finished background agents' reports go with this prompt (an empty prompt just delivers them).
+    const extra: Block[] = this.takeNotes();
+    if (blocks.length && this.opts.hooks?.has("UserPromptSubmit")) {
       const promptText = blocks.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n");
       const o = await this.opts.hooks.run({ ...this.hookBase("UserPromptSubmit"), prompt: promptText }, signal);
       yield* hookWarnings("UserPromptSubmit", o.warnings);
@@ -435,7 +578,7 @@ export class Agent {
           }
         }
       }
-      this.pushUser([...results, ...extraBlocks]);
+      this.pushUser([...results, ...extraBlocks, ...this.takeNotes()]);
       if (signal.aborted) {
         yield { type: "done", stop: "aborted", text };
         return;
@@ -481,16 +624,35 @@ export class Agent {
       }
       yield* events;
       const notices: AgentEvent[] = [];
-      const done = await Promise.all(
+      // Progress from running tools (subagents) is yielded while they run.
+      const live: AgentEvent[] = [];
+      let wake: (() => void) | undefined;
+      const all = Promise.all(
         batch.map((call) =>
           blind.has(call.id)
             ? Promise.resolve<ToolResult>({
                 content: `Not run: you read this file in the same reply, so you haven't seen its contents yet. Look at the read result, then make the change.`,
                 isError: true,
               })
-            : this.runOne(call, signal, notices),
+            : this.runOne(call, signal, notices, (text) => {
+                live.push({ type: "tool_progress", id: call.id, text });
+                wake?.();
+              }),
         ),
       );
+      let settled: { ok: true; value: ToolResult[] } | { ok: false; error: unknown } | undefined;
+      void all.then(
+        (value) => ((settled = { ok: true, value }), wake?.()),
+        (error: unknown) => ((settled = { ok: false, error }), wake?.()),
+      );
+      while (!settled || live.length) {
+        if (!live.length && !settled) await new Promise<void>((r) => (wake = r));
+        wake = undefined;
+        while (live.length) yield live.shift()!;
+      }
+      const outcome = settled as { ok: true; value: ToolResult[] } | { ok: false; error: unknown };
+      if (!outcome.ok) throw outcome.error;
+      const done = outcome.value;
       yield* notices;
       for (const [i, result] of done.entries()) {
         const call = batch[i]!;
@@ -508,7 +670,7 @@ export class Agent {
     return calls.map((c) => results.get(c.id) ?? errorResult(c.id, "Interrupted by the user before this tool ran."));
   }
 
-  private async runOne(call: ToolUseBlock, signal: AbortSignal, notices: AgentEvent[]): Promise<ToolResult> {
+  private async runOne(call: ToolUseBlock, signal: AbortSignal, notices: AgentEvent[], progress?: (text: string) => void): Promise<ToolResult> {
     const tool = this.findTool(call.name);
     if (!tool) return { content: `Unknown tool "${call.name}"`, isError: true };
 
@@ -566,7 +728,7 @@ export class Agent {
 
     let result: ToolResult;
     try {
-      result = await tool.run(input, { ...this.toolCtx, signal });
+      result = await tool.run(input, { ...this.toolCtx, signal, toolUseId: call.id, ...(progress ? { progress } : {}) });
       if (typeof result.content === "string") result = { ...result, content: truncate(result.content, MAX_TOOL_OUTPUT) };
     } catch (err) {
       if (signal.aborted) return { content: "Interrupted by the user.", isError: true };
@@ -659,6 +821,31 @@ export class Agent {
     this.usage.cacheWriteTokens = (this.usage.cacheWriteTokens ?? 0) + (u.cacheWriteTokens ?? 0);
     if (measures) this.lastInputTokens = u.inputTokens;
   }
+}
+
+export interface BackgroundTask {
+  id: string;
+  type: string;
+  description: string;
+  status: "running" | "done" | "failed" | "stopped";
+  startedAt: number;
+  /** The latest thing it did, while running. */
+  activity?: string;
+  /** Its report, when finished. */
+  result?: string;
+  controller: AbortController;
+  /** Settles when it finishes. */
+  done: Promise<void>;
+}
+
+function lastAssistantText(messages: Message[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role !== "assistant") continue;
+    const t = m.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("").trim();
+    if (t) return t;
+  }
+  return "";
 }
 
 function displayFile(root: string, abs: string): string {

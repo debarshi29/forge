@@ -59,7 +59,7 @@ export function ItemView({ item }: { item: Item }) {
   }
 }
 
-export function ToolCard({ name, summary, result, running }: { name: string; summary: string; result?: ToolResult; running?: boolean }) {
+export function ToolCard({ name, summary, result, running, progress }: { name: string; summary: string; result?: ToolResult; running?: boolean; progress?: string }) {
   const t = useTheme();
   const text = result ? (typeof result.content === "string" ? result.content : "[image]") : "";
   const dot = running ? t.warning : result?.isError ? t.error : t.success;
@@ -69,6 +69,11 @@ export function ToolCard({ name, summary, result, running }: { name: string; sum
         <Text color={dot}>● </Text>
         <Text bold>{name}</Text> <Text dimColor>{summary.split("\n")[0]}</Text>
       </Text>
+      {running && progress && (
+        <Box paddingLeft={2}>
+          <Text dimColor wrap="truncate-end">⎿ {progress}</Text>
+        </Box>
+      )}
       {result && (
         <Box paddingLeft={2}>
           {result.display && !result.isError ? (

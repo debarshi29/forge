@@ -102,7 +102,8 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
   const [staticKey, setStaticKey] = useState(0);
   const [liveText, setLiveText] = useState("");
   const [liveThinking, setLiveThinking] = useState("");
-  const [running, setRunning] = useState<Array<{ id: string; name: string; summary: string }>>([]);
+  const [running, setRunning] = useState<Array<{ id: string; name: string; summary: string; progress?: string }>>([]);
+  const busyRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [todos, setTodos] = useState<Todo[]>(agent.todos);
   const [showTasks, setShowTasks] = useState(true);
@@ -164,6 +165,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
       const ac = new AbortController();
       abortRef.current = ac;
       setBusy(true);
+      busyRef.current = true;
       setStartedAt(Date.now());
       setVerb(t.verbs[Math.floor(Math.random() * t.verbs.length)]!);
       setNow(Date.now());
@@ -192,6 +194,9 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
               flush();
               summaries.current.set(ev.id, ev.summary);
               setRunning((r) => [...r, { id: ev.id, name: ev.name, summary: ev.summary }]);
+              break;
+            case "tool_progress":
+              setRunning((r) => r.map((x) => (x.id === ev.id ? { ...x, progress: ev.text } : x)));
               break;
             case "tool_end":
               setRunning((r) => r.filter((x) => x.id !== ev.id));
@@ -244,11 +249,31 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
         abortRef.current = undefined;
         setRunning([]);
         setBusy(false);
+        busyRef.current = false;
         setCompacting(false);
         setUsageTick((n) => n + 1);
+        // A background agent finished during the turn and its report wasn't delivered yet.
+        if (agent.pendingNotes && !ac.signal.aborted) setTimeout(() => resumeRef.current?.(), 0);
       }
     },
     [agent, flush, push],
+  );
+  // Continue the conversation with finished background agents' reports.
+  const resumeRef = useRef<(() => void) | undefined>(undefined);
+  resumeRef.current = () => {
+    if (!busyRef.current && agent.pendingNotes) void runStream((signal) => agent.send([], signal));
+  };
+  useEffect(
+    () =>
+      agent.onBackgroundDone((task) => {
+        push({
+          kind: "info",
+          text: `⧉ Background agent ${task.id} (${task.description}) ${task.status === "done" ? "finished" : task.status}.`,
+          tone: task.status === "done" ? "info" : "warn",
+        });
+        if (!busyRef.current) resumeRef.current?.();
+      }),
+    [agent, push],
   );
   const runTurn = useCallback((prompt: string) => runStream((signal) => agent.send(prompt, signal)), [agent, runStream]);
 
@@ -475,7 +500,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
         </Box>
       )}
       {running.map((r) => (
-        <ToolCard key={r.id} name={r.name} summary={r.summary} running />
+        <ToolCard key={r.id} name={r.name} summary={r.summary} running {...(r.progress ? { progress: r.progress } : {})} />
       ))}
 
       {busy && !pending && (

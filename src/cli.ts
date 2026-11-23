@@ -19,6 +19,8 @@ import { baseModelName, isContextVariant, listModelOptions, listOllamaModels, lo
 import { planAutoContext, stepDown } from "./providers/ollamaFit.js";
 import type { Provider } from "./providers/types.js";
 import { formatBench, runBench } from "./bench/index.js";
+import { loadAgentTypes } from "./agent/subagents.js";
+import { makeTaskTool } from "./tools/task.js";
 import type { ProviderSettings } from "./providers/registry.js";
 import { defaultTools } from "./tools/registry.js";
 import { App, type AskBridge, type PetSettings } from "./ui/App.js";
@@ -83,6 +85,8 @@ const program = new Command()
       }
     }
     const warnings = [resolved.warning, fastWarning].filter((w): w is string => Boolean(w));
+    const agentTypes = loadAgentTypes(root);
+    warnings.push(...agentTypes.errors.map((e) => `Skipped an agent file: ${e}`));
 
     const headless = flags.print !== undefined;
     if (headless) for (const w of warnings) process.stderr.write(`\x1b[33m⚠ ${w}\x1b[0m\n`);
@@ -112,7 +116,7 @@ const program = new Command()
     }
 
     const memory = loadMemory(root);
-    const tools = defaultTools();
+    const tools = [...defaultTools(), makeTaskTool(agentTypes.types)];
     const agent = new Agent({
       provider,
       model,
@@ -127,6 +131,11 @@ const program = new Command()
       ...(fast ? { fast } : {}),
       diagnostics: config.diagnostics,
       repairToolCalls: config.repairToolCalls,
+      agentTypes: agentTypes.types,
+      resolveModel: async (spec: string) => {
+        const r = await resolveModelForUse(spec, providerSettings);
+        return { provider: r.provider, model: r.model };
+      },
     });
 
     // Sessions: --continue (latest), --resume <id>, or --resume alone (picker).
@@ -318,10 +327,21 @@ async function runPrompt(agent: Agent, prompt: string, output: "text" | "json"):
   process.once("SIGINT", onSigint);
   let ok = true;
   try {
-    for await (const ev of agent.send(prompt, ac.signal)) {
-      if (output === "json") process.stdout.write(JSON.stringify(ev) + "\n");
-      else renderText(ev);
-      if (ev.type === "done") ok = ev.stop === "end_turn";
+    let next: string | [] = prompt;
+    // Background agents report back after the turn: wait for them and let the model use their reports.
+    while (true) {
+      for await (const ev of agent.send(next, ac.signal)) {
+        if (output === "json") process.stdout.write(JSON.stringify(ev) + "\n");
+        else renderText(ev);
+        if (ev.type === "done") ok = ev.stop === "end_turn";
+      }
+      if (ac.signal.aborted || !ok) break;
+      if (agent.backgroundTasks.some((t) => t.status === "running")) {
+        if (output === "text") process.stderr.write("\x1b[2m[waiting for background agents…]\x1b[0m\n");
+        await agent.waitForBackground();
+      }
+      if (!agent.pendingNotes) break;
+      next = [];
     }
   } catch (err) {
     ok = false;
@@ -354,6 +374,9 @@ function renderText(ev: AgentEvent): void {
     case "tool_start":
       thinking = false;
       process.stderr.write(`\n\x1b[35m● ${ev.name}\x1b[0m ${dim(ev.summary)}\n`);
+      break;
+    case "tool_progress":
+      process.stderr.write(`\x1b[2m  ⎿ ${ev.text}\x1b[0m\n`);
       break;
     case "tool_end": {
       const text = typeof ev.result.content === "string" ? ev.result.content : "[image]";

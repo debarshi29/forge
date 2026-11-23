@@ -241,6 +241,30 @@ export const COMMANDS: SlashCommand[] = [
     },
   },
   {
+    name: "agents",
+    args: "[stop <id>]",
+    description: "List subagent types and background agents; stop one",
+    run(args, ctx) {
+      const [verb, id] = args.trim().split(/\s+/);
+      if (verb === "stop") {
+        if (!id) return ctx.print("Usage: /agents stop <id>", "error");
+        const stopped = ctx.agent.stopBackground(id);
+        return ctx.print(stopped ? `Stopping ${id}.` : `No running background agent "${id}".`, stopped ? "info" : "warn");
+      }
+      const types = ctx.agent.agentTypes
+        .map((t) => `  ${t.name.padEnd(12)}${t.description.length > 90 ? `${t.description.slice(0, 89)}…` : t.description}${t.source === "built-in" ? "" : `\n  ${"".padEnd(12)}(${t.source})`}`)
+        .join("\n");
+      const bg = ctx.agent.backgroundTasks;
+      const now = Date.now();
+      const bgText = bg.length
+        ? `\n\nBackground agents:\n${bg
+            .map((t) => `  ${t.id.padEnd(10)}${t.status.padEnd(9)}${t.type}: ${t.description} (${Math.round((now - t.startedAt) / 1000)}s)${t.status === "running" && t.activity ? `\n  ${"".padEnd(19)}⎿ ${t.activity}` : ""}`)
+            .join("\n")}`
+        : "";
+      ctx.print(`Subagent types (add your own in .forge/agents/*.md):\n${types}${bgText}`);
+    },
+  },
+  {
     name: "todos",
     description: "Show the current task list",
     run(_a, ctx) {
