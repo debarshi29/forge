@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadConfig } from "../src/config/index.js";
+import { loadConfig, saveOllamaContextLength } from "../src/config/index.js";
 import { tempDir } from "./helpers.js";
 
 describe("config", () => {
@@ -40,6 +40,18 @@ describe("config", () => {
     const home = await tempDir();
     await fs.writeFile(path.join(home, "settings.json"), JSON.stringify({ permissions: { allow: ["bash(git"] } }));
     expect(() => loadConfig(home, {}, { FORGE_HOME: home })).toThrow(/permissions\.allow\.0: Invalid permission rule/);
+  });
+
+  it("saves per-model context lengths without touching other settings", async () => {
+    const home = await tempDir();
+    const env = { FORGE_HOME: home };
+    await fs.writeFile(path.join(home, "settings.json"), JSON.stringify({ theme: "ocean", ollama: { baseURL: "http://box:11434/v1" } }));
+    saveOllamaContextLength("qwen3:4b", 32768, env);
+    saveOllamaContextLength("qwen2.5-coder:7b", 16384, env);
+    saveOllamaContextLength("qwen2.5-coder:7b", undefined, env);
+    const saved = JSON.parse(await fs.readFile(path.join(home, "settings.json"), "utf8"));
+    expect(saved).toEqual({ theme: "ocean", ollama: { baseURL: "http://box:11434/v1", contextLengths: { "qwen3:4b": 32768 } } });
+    expect(loadConfig(home, {}, env).ollama.contextLengths).toEqual({ "qwen3:4b": 32768 });
   });
 
   it("reports invalid settings", async () => {

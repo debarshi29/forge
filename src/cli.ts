@@ -11,11 +11,11 @@ import { loadMemory } from "./agent/memory.js";
 import { findSession, listSessions, resumeInto, Session } from "./agent/session.js";
 import { buildSystemPrompt } from "./agent/systemPrompt.js";
 import { messagesToItems } from "./ui/history.js";
-import { loadConfig, saveUserSettings } from "./config/index.js";
+import { loadConfig, saveOllamaContextLength, saveUserSettings } from "./config/index.js";
 import { DEFAULT_THEME, findTheme } from "./ui/theme.js";
 import { PERMISSION_MODES, Permissions, type AskFn, type PermissionMode } from "./permissions/index.js";
 import { Hooks } from "./hooks/index.js";
-import { listModelOptions, resolveModelForUse } from "./providers/catalog.js";
+import { baseModelName, listModelOptions, listOllamaModels, loadOllamaModel, ollamaBaseURL, resolveModelForUse } from "./providers/catalog.js";
 import type { ProviderSettings } from "./providers/registry.js";
 import { defaultTools } from "./tools/registry.js";
 import { App, type AskBridge, type PetSettings } from "./ui/App.js";
@@ -65,6 +65,7 @@ const program = new Command()
     const { provider, model } = resolved;
 
     const headless = flags.print !== undefined;
+    if (resolved.warning && headless) process.stderr.write(`\x1b[33m⚠ ${resolved.warning}\x1b[0m\n`);
     const tty = Boolean(process.stdin.isTTY);
     // Headless: ask on stderr with readline. Interactive: the TUI's dialog.
     const rl = headless && tty ? readline.createInterface({ input: process.stdin, output: process.stderr }) : undefined;
@@ -101,6 +102,8 @@ const program = new Command()
       root,
       maxTokens: config.maxTokens,
       hooks: new Hooks(config.hooks, root),
+      autoCompact: config.autoCompact,
+      compactThreshold: config.compactThreshold,
     });
 
     // Sessions: --continue (latest), --resume <id>, or --resume alone (picker).
@@ -129,6 +132,7 @@ const program = new Command()
         if (pickSession && headless) throw new Error("--resume needs a session id in -p mode (or use --continue)");
       }
     }
+    if (resolved.warning && !headless) initialItems = [...(initialItems ?? []), { kind: "info", text: `⚠ ${resolved.warning}`, tone: "warn" }];
 
     if (flags.print !== undefined) {
       const ok = await runPrompt(agent, flags.print, flags.output);
@@ -156,8 +160,44 @@ const program = new Command()
         switchModel: async (spec: string) => {
           const next = await resolveModelForUse(spec, providerSettings);
           agent.setModel(next.provider, next.model, buildSystemPrompt({ root, cwd: root, model: next.spec, memory }));
+          return next.warning ? { warning: next.warning } : undefined;
         },
         listModels: () => listModelOptions(providerSettings),
+        setContextLength: async (tokens: number | undefined) => {
+          if (!agent.modelSpec.startsWith("ollama:")) {
+            throw new Error("The context size can only be changed for Ollama models; cloud models have a fixed window.");
+          }
+          const base = baseModelName(agent.model);
+          const baseURL = ollamaBaseURL(providerSettings);
+          if (tokens !== undefined) {
+            if (tokens < 4096) throw new Error("Use at least 4k: Forge's instructions and tools alone take about 4k.");
+            const max = (await listOllamaModels(baseURL))?.find((m) => m.name === base)?.contextLength;
+            if (max && tokens > max) throw new Error(`${base} supports at most ${Math.round(max / 1024)}k.`);
+          }
+          const lengths = { ...(providerSettings.ollama?.contextLengths ?? {}) };
+          if (tokens === undefined) delete lengths[base];
+          else lengths[base] = tokens;
+          providerSettings.ollama = { ...providerSettings.ollama, contextLengths: lengths };
+          const next = await resolveModelForUse(`ollama:${base}`, providerSettings);
+          agent.setModel(next.provider, next.model, buildSystemPrompt({ root, cwd: root, model: next.spec, memory }));
+          try {
+            saveOllamaContextLength(base, tokens);
+          } catch {
+            // Not fatal: it still applies to this session.
+          }
+          const loaded = await loadOllamaModel(baseURL, next.model);
+          const k = Math.round((loaded.context ?? agent.contextWindow) / 1024);
+          const where =
+            loaded.gpuPercent === undefined
+              ? ""
+              : loaded.gpuPercent >= 100
+                ? " It fits entirely on the GPU."
+                : ` About ${100 - loaded.gpuPercent}% of it now runs on the CPU, so replies will be slower; a smaller size keeps it on the GPU.`;
+          return {
+            text: `${base} now runs with a ${k}k context${tokens ? " (saved for this model)" : " (Ollama's default)"}.${where}`,
+            tone: loaded.gpuPercent !== undefined && loaded.gpuPercent < 100 ? ("warn" as const) : ("info" as const),
+          };
+        },
         initialTheme: findTheme(config.theme) ?? DEFAULT_THEME,
         mouse: input.mouse,
         initialPet: { kind: config.pet ?? "none", name: config.petName, clicks: config.petMouse ?? false },
@@ -232,6 +272,16 @@ function renderText(ev: AgentEvent): void {
       const text = typeof ev.result.content === "string" ? ev.result.content : "[image]";
       const preview = text.split("\n").slice(0, 4).join("\n  ");
       process.stderr.write(`  ${ev.result.isError ? "\x1b[31m" : "\x1b[2m"}${preview}${text.split("\n").length > 4 ? " …" : ""}\x1b[0m\n`);
+      break;
+    }
+    case "compact":
+      if (ev.phase === "start") process.stderr.write(dim(`\n[compacting the conversation (~${ev.tokens} tokens)…]\n`));
+      else if (ev.phase === "end") process.stderr.write(dim(`[compacted: ~${ev.before} → ~${ev.after} tokens]\n`));
+      else process.stderr.write(`\x1b[33m[${ev.message}]\x1b[0m\n`);
+      break;
+    case "todos": {
+      const mark = { pending: "☐", in_progress: "◐", completed: "✔" } as const;
+      process.stderr.write(dim(`  ${ev.todos.map((t) => `${mark[t.status]} ${t.content}`).join("\n  ")}\n`));
       break;
     }
     case "hook":

@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import type { PlanDecision } from "../permissions/index.js";
 import type { ImageBlock, TextBlock } from "../providers/types.js";
+import type { Todo } from "./todo.js";
 
 export interface ToolResult {
   /** What the model sees. */
@@ -22,6 +23,8 @@ export interface ToolContext {
   shell: { cwd: string };
   /** Show a plan to the user and leave plan mode if they approve (exit_plan_mode). */
   approvePlan?(plan: string): Promise<PlanDecision>;
+  /** The agent's task list, updated by todo_write. */
+  todos?: { items: Todo[] };
 }
 
 export interface Tool<S extends z.ZodType = z.ZodType> {

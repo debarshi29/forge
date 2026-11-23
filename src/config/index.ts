@@ -34,6 +34,10 @@ const SettingsSchema = z
     effort: z.enum(["low", "medium", "high", "xhigh", "max"]),
     permissionMode: z.enum(PERMISSION_MODES as [PermissionMode, ...PermissionMode[]]),
     maxTokens: z.number().int().positive(),
+    /** Summarize older turns near the context limit (default true). */
+    autoCompact: z.boolean(),
+    /** Fraction of the context window that triggers auto-compaction (default 0.8). */
+    compactThreshold: z.number().min(0.3).max(0.95),
     theme: z.string(),
     pet: z.string(),
     petName: z.string(),
@@ -42,7 +46,14 @@ const SettingsSchema = z
     anthropic: z.object({ baseURL: z.string(), fallbacks: z.boolean() }).partial(),
     openai: z.object({ baseURL: z.string(), contextWindow: z.number().int().positive() }).partial(),
     gemini: z.object({ vertexai: z.boolean(), project: z.string(), location: z.string() }).partial(),
-    ollama: z.object({ baseURL: z.string(), contextWindow: z.number().int().positive() }).partial(),
+    ollama: z
+      .object({
+        baseURL: z.string(),
+        contextWindow: z.number().int().positive(),
+        /** Per model: the context length to run it with (set by /context <size>). */
+        contextLengths: z.record(z.string(), z.number().int().min(2048).max(1_048_576)),
+      })
+      .partial(),
     lmstudio: z.object({ baseURL: z.string(), contextWindow: z.number().int().positive() }).partial(),
     /** Permission rules like "bash(git status:*)" or "edit(src/**)". */
     permissions: z.object({ allow: RuleList, deny: RuleList, ask: RuleList }).partial(),
@@ -60,6 +71,8 @@ export interface Config {
   effort: NonNullable<Settings["effort"]>;
   permissionMode: PermissionMode;
   maxTokens?: number;
+  autoCompact: boolean;
+  compactThreshold: number;
   theme?: string;
   pet?: string;
   petName?: string;
@@ -139,6 +152,8 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
     effort: merged.effort ?? "high",
     permissionMode: merged.permissionMode ?? "default",
     maxTokens: merged.maxTokens,
+    autoCompact: merged.autoCompact ?? true,
+    compactThreshold: merged.compactThreshold ?? 0.8,
     theme: merged.theme,
     pet: merged.pet,
     petName: merged.petName,
@@ -156,6 +171,32 @@ export function loadConfig(root: string, flags: Settings = {}, env: NodeJS.Proce
     hooks: merged.hooks ?? {},
     sources,
   };
+}
+
+/** Read-modify-write ~/.forge/settings.json (for nested changes). */
+export function updateUserSettings(fn: (current: Record<string, unknown>) => Record<string, unknown>, env: NodeJS.ProcessEnv = process.env): void {
+  const file = path.join(forgeHome(env), "settings.json");
+  let current: Record<string, unknown> = {};
+  try {
+    current = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  } catch {
+    // missing or unreadable: start fresh
+  }
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(fn(current), null, 2) + "\n");
+}
+
+/** Save the context length for one Ollama model (undefined removes it). */
+export function saveOllamaContextLength(model: string, tokens: number | undefined, env: NodeJS.ProcessEnv = process.env): void {
+  updateUserSettings((cur) => {
+    const ollama = { ...((cur.ollama as Record<string, unknown> | undefined) ?? {}) };
+    const lengths = { ...((ollama.contextLengths as Record<string, number> | undefined) ?? {}) };
+    if (tokens === undefined) delete lengths[model];
+    else lengths[model] = tokens;
+    if (Object.keys(lengths).length) ollama.contextLengths = lengths;
+    else delete ollama.contextLengths;
+    return { ...cur, ollama };
+  }, env);
 }
 
 /**

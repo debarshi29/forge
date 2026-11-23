@@ -4,6 +4,8 @@ import { formatCost, priceFor } from "../agent/cost.js";
 import type { MemoryFile } from "../agent/memory.js";
 import { formatTokens } from "../ui/format.js";
 import { THEMES } from "../ui/theme.js";
+import { contextBreakdown, formatContext } from "../agent/context.js";
+import { formatTodos } from "../tools/todo.js";
 
 export interface CommandContext {
   agent: Agent;
@@ -17,7 +19,7 @@ export interface CommandContext {
   allowBypass: boolean;
   memory: MemoryFile[];
   /** Resolve a "provider:model" spec and switch the agent to it; rejects on bad specs. */
-  switchModel?(spec: string): Promise<void>;
+  switchModel?(spec: string): Promise<void | { warning?: string }>;
   /** Open the interactive model list. */
   openModelPicker?(): void;
   /** Open the theme picker (live preview). */
@@ -31,6 +33,12 @@ export interface CommandContext {
   pet?: { kind: string; name: string; clicks: boolean };
   updatePet?(patch: { kind?: string; name?: string; clicks?: boolean }): void;
   pokePet?(): void;
+  /** Summarize older turns now (/compact). */
+  compact?(focus?: string): Promise<void>;
+  /** A turn is running. */
+  busy?: boolean;
+  /** Run the current (Ollama) model with this context length; undefined = server default. Returns a report. */
+  setContextLength?(tokens: number | undefined): Promise<{ text: string; tone?: "info" | "warn" }>;
 }
 
 export interface SlashCommand {
@@ -47,7 +55,7 @@ export const COMMANDS: SlashCommand[] = [
     run(_a, ctx) {
       const cmds = COMMANDS.map((c) => `  /${c.name}${c.args ? ` ${c.args}` : ""}`.padEnd(24) + c.description).join("\n");
       ctx.print(
-        `Commands:\n${cmds}\n\nKeys:\n  Enter submit · \\ then Enter for a new line · ↑/↓ history\n  Esc or Ctrl+C interrupt · Shift+Tab cycle permission mode (plan mode: read-only, then approve a plan) · Ctrl+C twice (idle) exit`,
+        `Commands:\n${cmds}\n\nKeys:\n  Enter submit · \\ then Enter for a new line · ↑/↓ history\n  Esc or Ctrl+C interrupt · Shift+Tab cycle permission mode (plan mode: read-only, then approve a plan) · Ctrl+T show/hide tasks · Ctrl+C twice (idle) exit`,
       );
     },
   },
@@ -179,6 +187,47 @@ export const COMMANDS: SlashCommand[] = [
     },
   },
   {
+    name: "compact",
+    args: "[focus]",
+    description: "Summarize older turns to free up context",
+    async run(args, ctx) {
+      if (ctx.busy) return ctx.print("Wait for the current turn to finish (or press Esc), then /compact.", "warn");
+      if (!ctx.compact) return ctx.print("Compaction is not available here.", "warn");
+      await ctx.compact(args.trim() || undefined);
+    },
+  },
+  {
+    name: "context",
+    args: "[size | default]",
+    description: "Show what fills the context window, or set its size (e.g. /context 32k)",
+    async run(args, ctx) {
+      const a = args.trim().toLowerCase();
+      if (!a) return ctx.print(formatContext(contextBreakdown(ctx.agent, ctx.memory)));
+      if (ctx.busy) return ctx.print("Wait for the current turn to finish, then change the context size.", "warn");
+      if (!ctx.setContextLength) return ctx.print("Changing the context size isn't available here.", "warn");
+      let tokens: number | undefined;
+      if (!["default", "reset", "auto"].includes(a)) {
+        tokens = parseContextSize(a);
+        if (tokens === undefined) return ctx.print('Usage: /context [size | default], e.g. /context 32k or /context 24576', "error");
+      }
+      ctx.print(tokens ? `Setting the context to ${Math.round(tokens / 1024)}k and loading the model…` : "Going back to Ollama's default context and loading the model…");
+      try {
+        const r = await ctx.setContextLength(tokens);
+        ctx.print(r.text, r.tone);
+      } catch (err) {
+        ctx.print(err instanceof Error ? err.message : String(err), "error");
+      }
+    },
+  },
+  {
+    name: "todos",
+    description: "Show the current task list",
+    run(_a, ctx) {
+      const t = ctx.agent.todos;
+      ctx.print(t.length ? `Tasks:\n${formatTodos(t)}` : "No tasks yet. Forge keeps a task list for multi-step work.");
+    },
+  },
+  {
     name: "permissions",
     description: "Show the permission mode, rules and hooks in effect",
     run(_a, ctx) {
@@ -237,11 +286,20 @@ export const COMMANDS: SlashCommand[] = [
 export async function switchTo(spec: string, ctx: Pick<CommandContext, "agent" | "print" | "switchModel">): Promise<void> {
   if (!ctx.switchModel) return ctx.print("Model switching is not available here.", "warn");
   try {
-    await ctx.switchModel(spec);
+    const r = await ctx.switchModel(spec);
     ctx.print(`Switched to ${ctx.agent.modelSpec}. The conversation continues on the new model.`);
+    if (r && r.warning) ctx.print(r.warning, "warn");
   } catch (err) {
     ctx.print(err instanceof Error ? err.message : String(err), "error");
   }
+}
+
+/** "32k" → 32768, "24576" → 24576; undefined if it isn't a size. */
+export function parseContextSize(s: string): number | undefined {
+  const m = /^(\d+(?:\.\d+)?)\s*(k)?$/i.exec(s.trim());
+  if (!m) return undefined;
+  const n = Math.round(Number(m[1]) * (m[2] ? 1024 : 1));
+  return n > 0 ? n : undefined;
 }
 
 /** Commands for the slash menu: name-prefix matches first, then names containing the text. */

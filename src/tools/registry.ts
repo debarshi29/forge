@@ -3,6 +3,7 @@ import type { ToolSpec } from "../providers/types.js";
 import { bashTool } from "./bash.js";
 import { editTool } from "./edit.js";
 import { exitPlanModeTool } from "./exitPlanMode.js";
+import { todoWriteTool } from "./todo.js";
 import { globTool } from "./glob.js";
 import { grepTool } from "./grep.js";
 import { lsTool } from "./ls.js";
@@ -11,7 +12,7 @@ import type { Tool } from "./types.js";
 import { writeTool } from "./write.js";
 
 export function defaultTools(): Tool[] {
-  return [readTool, writeTool, editTool, globTool, grepTool, lsTool, bashTool, exitPlanModeTool] as Tool[];
+  return [readTool, writeTool, editTool, globTool, grepTool, lsTool, bashTool, todoWriteTool, exitPlanModeTool] as Tool[];
 }
 
 export function toToolSpec(tool: Tool): ToolSpec {

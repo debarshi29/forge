@@ -19,7 +19,8 @@ export interface ProviderSettings {
   anthropic?: AnthropicOptions;
   openai?: { apiKey?: string; baseURL?: string; contextWindow?: number };
   gemini?: GeminiOptions;
-  ollama?: { baseURL?: string; contextWindow?: number };
+  /** contextLengths: per installed model, the context Forge asks Ollama to run it with. */
+  ollama?: { baseURL?: string; contextWindow?: number; contextLengths?: Record<string, number> };
   lmstudio?: { baseURL?: string; contextWindow?: number };
 }
 

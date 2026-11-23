@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { HookEvent, Hooks } from "../hooks/index.js";
 import type { PermissionMode, Permissions } from "../permissions/index.js";
 import { ProviderStreamError } from "../providers/errors.js";
@@ -8,10 +9,13 @@ import type {
   StopReason,
   StreamEvent,
   ToolResultBlock,
+  ToolSpec,
   ToolUseBlock,
   Usage,
 } from "../providers/types.js";
 import { toToolSpec } from "../tools/registry.js";
+import { formatTodos, type Todo } from "../tools/todo.js";
+import { chooseCut, estimateMessages, estimateTokens, shrinkToolResults, summarize, summaryMessage } from "./compact.js";
 import { costOf } from "./cost.js";
 import { appendUser } from "./history.js";
 import { ToolError, type Tool, type ToolContext, type ToolResult } from "../tools/types.js";
@@ -41,6 +45,10 @@ export type AgentEvent =
   | { type: "tool_end"; id: string; name: string; result: ToolResult }
   | { type: "retry"; attempt: number; reason: string }
   | { type: "hook"; event: HookEvent; text: string; tone: "info" | "warn" | "error" }
+  | { type: "compact"; phase: "start"; reason: "auto" | "manual"; tokens: number }
+  | { type: "compact"; phase: "end"; before: number; after: number; summary: string }
+  | { type: "compact"; phase: "error"; message: string }
+  | { type: "todos"; todos: Todo[] }
   | { type: "done"; stop: StopReason | "aborted" | "blocked"; text: string; detail?: string };
 
 export interface AgentOptions {
@@ -57,12 +65,21 @@ export interface AgentOptions {
   recorder?: Recorder;
   /** User-configured shell hooks (settings "hooks"). */
   hooks?: Hooks;
+  /** Summarize older turns when the context passes the threshold (default true). */
+  autoCompact?: boolean;
+  /** Fraction of the context window that triggers auto-compaction (default 0.8). */
+  compactThreshold?: number;
 }
 
 export interface Recorder {
   /** Called with exactly what was appended (user content may be merged on replay). */
   message(message: Message): void;
-  usage(model: string, usage: Usage): void;
+  /**  marks requests that don't measure the context (summaries). */
+  usage(model: string, usage: Usage, side?: boolean): void;
+  /** The history was replaced by a compacted one. */
+  compact?(messages: Message[]): void;
+  /** The task list changed. */
+  todos?(todos: Todo[]): void;
 }
 
 export class Agent {
@@ -75,6 +92,9 @@ export class Agent {
   private readonly toolCtx: Omit<ToolContext, "signal">;
   /** Mode when the last prompt was sent, to tell the model when plan mode ends. */
   private lastPromptMode: PermissionMode | undefined;
+  /** messages.length when lastInputTokens was measured. */
+  private measuredAt = 0;
+  private readonly todoState: { items: Todo[] } = { items: [] };
 
   constructor(private opts: AgentOptions) {
     this.messages = opts.messages ?? [];
@@ -85,6 +105,7 @@ export class Agent {
       fileState: new Map(),
       shell: { cwd },
       approvePlan: (plan) => this.opts.permissions.approvePlan(plan),
+      todos: this.todoState,
     };
   }
 
@@ -106,6 +127,38 @@ export class Agent {
     this.opts.provider = provider;
     this.opts.model = model;
     if (system !== undefined) this.opts.system = system;
+  }
+
+  get system(): string {
+    return this.opts.system;
+  }
+
+  toolSpecs(): ToolSpec[] {
+    return this.opts.tools.map(toToolSpec);
+  }
+
+  /** The current task list (todo_write). */
+  get todos(): Todo[] {
+    return this.todoState.items;
+  }
+
+  setTodos(todos: Todo[]): void {
+    this.todoState.items = todos;
+  }
+
+  /**
+   * Best estimate of what the next request will send: the last measured
+   * input plus whatever was appended since, or a character-based estimate.
+   */
+  get contextTokens(): number {
+    const added = estimateMessages(this.messages.slice(this.measuredAt));
+    if (this.lastInputTokens > 0) return this.lastInputTokens + added;
+    return estimateTokens(this.opts.system) + estimateTokens(JSON.stringify(this.toolSpecs())) + estimateMessages(this.messages);
+  }
+
+  /** Context tokens at which auto-compaction kicks in. */
+  get compactAt(): number {
+    return Math.floor(this.contextWindow * (this.opts.compactThreshold ?? 0.8));
   }
 
   get contextWindow(): number {
@@ -133,18 +186,75 @@ export class Agent {
     this.messages.length = 0;
     this.toolCtx.fileState.clear();
     this.lastInputTokens = 0;
+    this.measuredAt = 0;
     this.lastPromptMode = undefined;
+    this.todoState.items = [];
   }
 
   /** Replace the conversation with a saved one (/resume). */
-  load(messages: Message[], totals?: { usage: Usage; costUSD: number; lastInputTokens: number }): void {
+  load(messages: Message[], totals?: { usage: Usage; costUSD: number; lastInputTokens: number; todos?: Todo[] }): void {
     this.reset();
     this.messages.push(...messages);
     if (totals) {
       Object.assign(this.usage, totals.usage);
       this.costUSD = totals.costUSD;
       this.lastInputTokens = totals.lastInputTokens;
+      this.measuredAt = totals.lastInputTokens ? messages.length : 0;
+      this.todoState.items = totals.todos ?? [];
     }
+  }
+
+  /**
+   * Replace older turns with a model-written summary (/compact, or
+   * automatically near the context limit). Keeps recent turns verbatim.
+   * On failure or abort the history is left untouched.
+   */
+  async *compact(opts: { focus?: string; signal?: AbortSignal; reason?: "auto" | "manual" } = {}): AsyncGenerator<AgentEvent, "skipped" | "failed" | "done"> {
+    const signal = opts.signal ?? new AbortController().signal;
+    const before = this.contextTokens;
+    const auto = opts.reason === "auto";
+    // Auto keeps recent turns up to a quarter of the window; /compact keeps only the latest reply.
+    const cut = chooseCut(this.messages, auto ? Math.floor(this.contextWindow * 0.25) : 0);
+    if (cut === undefined) {
+      if (!auto) yield { type: "compact", phase: "error", message: "Nothing to compact yet." };
+      return "skipped";
+    }
+    yield { type: "compact", phase: "start", reason: opts.reason ?? "manual", tokens: before };
+    const old = this.messages.slice(0, cut);
+    let summary: string;
+    try {
+      const r = await summarize({
+        provider: this.opts.provider,
+        model: this.opts.model,
+        messages: old,
+        contextWindow: this.contextWindow,
+        ...(opts.focus ? { focus: opts.focus } : {}),
+        signal,
+      });
+      summary = r.summary;
+      this.addUsage(r.usage, false);
+    } catch (err) {
+      if (signal.aborted) {
+        yield { type: "compact", phase: "error", message: "Compaction interrupted; the conversation is unchanged." };
+        return "failed";
+      }
+      yield { type: "compact", phase: "error", message: `Compaction failed (${err instanceof Error ? err.message : String(err)}); the conversation is unchanged.` };
+      return "failed";
+    }
+    const files = [...this.toolCtx.fileState.keys()].map((f) => displayFile(this.opts.root, f));
+    const todos = this.todoState.items.length ? formatTodos(this.todoState.items) : undefined;
+    // If the kept turns are still too big on their own, trim their tool output too.
+    const kept = shrinkToolResults(this.messages.slice(cut), Math.floor(this.contextWindow * 0.25));
+    const next = [summaryMessage(summary, { files, ...(todos ? { todos } : {}) }), ...kept];
+    this.messages.length = 0;
+    this.messages.push(...next);
+    // File contents are gone from context: make edits read the file again first.
+    this.toolCtx.fileState.clear();
+    this.lastInputTokens = 0;
+    this.measuredAt = 0;
+    this.opts.recorder?.compact?.(next);
+    yield { type: "compact", phase: "end", before, after: this.contextTokens, summary };
+    return "done";
   }
 
   setRecorder(recorder: Recorder | undefined): void {
@@ -174,7 +284,16 @@ export class Agent {
     const toolSpecs = this.opts.tools.map(toToolSpec);
     let stopHookRuns = 0;
 
+    let compactedThisTurn = 0;
     while (true) {
+      if ((this.opts.autoCompact ?? true) && this.contextTokens >= this.compactAt && compactedThisTurn < 2 && !signal.aborted) {
+        // A failed attempt counts too, so a broken summarizer isn't retried before every request.
+        if ((yield* this.compact({ signal, reason: "auto" })) !== "skipped") compactedThisTurn++;
+        if (signal.aborted) {
+          yield { type: "done", stop: "aborted", text: "" };
+          return;
+        }
+      }
       // --- stream one assistant turn (re-issued on retryable stream errors) ---
       let end: Extract<StreamEvent, { type: "message_end" }> | undefined;
       for (let attempt = 0; !end; attempt++) {
@@ -205,6 +324,7 @@ export class Agent {
       }
 
       this.addUsage(end.usage);
+      this.measuredAt = this.messages.length;
       this.messages.push(end.message); // verbatim, never edited afterwards
       this.opts.recorder?.message(end.message);
       yield { type: "assistant_message", message: end.message, stop: end.stop, usage: end.usage };
@@ -280,6 +400,10 @@ export class Agent {
         const call = batch[i]!;
         results.set(call.id, toResultBlock(call.id, result));
         yield { type: "tool_end", id: call.id, name: call.name, result };
+        if (call.name === "todo_write" && !result.isError) {
+          this.opts.recorder?.todos?.(this.todoState.items);
+          yield { type: "todos", todos: this.todoState.items };
+        }
       }
     }
 
@@ -377,15 +501,21 @@ export class Agent {
     this.opts.recorder?.message({ role: "user", content });
   }
 
-  private addUsage(u: Usage): void {
+  /** Count usage; `measures` = false for side requests (summaries) that don't reflect the context size. */
+  private addUsage(u: Usage, measures = true): void {
     this.costUSD += costOf(this.modelSpec, u) ?? 0;
-    this.opts.recorder?.usage(this.modelSpec, u);
+    this.opts.recorder?.usage(this.modelSpec, u, !measures);
     this.usage.inputTokens += u.inputTokens;
     this.usage.outputTokens += u.outputTokens;
     this.usage.cacheReadTokens = (this.usage.cacheReadTokens ?? 0) + (u.cacheReadTokens ?? 0);
     this.usage.cacheWriteTokens = (this.usage.cacheWriteTokens ?? 0) + (u.cacheWriteTokens ?? 0);
-    this.lastInputTokens = u.inputTokens;
+    if (measures) this.lastInputTokens = u.inputTokens;
   }
+}
+
+function displayFile(root: string, abs: string): string {
+  const rel = path.relative(root, abs);
+  return (rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel : abs).split(path.sep).join("/");
 }
 
 function hookWarnings(event: HookEvent, warnings: string[]): AgentEvent[] {

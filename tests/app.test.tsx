@@ -306,6 +306,54 @@ describe("TUI", () => {
     await until(() => stdout.text().includes("denied"));
   });
 
+  it("shows the live task list above the prompt and hides it with Ctrl+T", async () => {
+    const todos = [
+      { content: "Read the code", status: "completed" },
+      { content: "Fix the bug", status: "in_progress", activeForm: "Fixing the bug" },
+      { content: "Run the tests", status: "pending" },
+    ];
+    const { stdout, type } = await mount([{ toolCalls: [{ name: "todo_write", input: { todos } }] }, { text: "On it.", delayMs: 400 }]);
+    await type("fix it\r");
+    await until(() => stdout.text().includes("Tasks") && stdout.text().includes("1/3 done") && stdout.text().includes("Fixing the bug"));
+    expect(stdout.text()).toContain("☐ Run the tests");
+    await until(() => stdout.text().includes("On it."));
+    const before = stdout.frames.length;
+    await type("\x14"); // Ctrl+T
+    await until(() => stdout.frames.length > before);
+    await sleep(50);
+    expect(stdout.frames.slice(before).join("")).not.toContain("1/3 done");
+  });
+
+  it("shows the context breakdown and compacts on request", async () => {
+    const { agent, stdout, type } = await mount([{ text: "First answer." }, { text: "## Request\nsay hi" }]);
+    await type("hi\r");
+    await until(() => stdout.text().includes("First answer."));
+    await type("/context\r");
+    await until(() => stdout.text().includes("Tool definitions") && stdout.text().includes("Auto-compact at"));
+    await type("/compact\r");
+    await until(() => stdout.text().includes("Compacted the conversation"));
+    expect(agent.messages[0]!.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("say hi") });
+  });
+
+  it("sets the context size with /context <size>", async () => {
+    const calls: Array<number | undefined> = [];
+    const { stdout, type } = await mount([], "default", {
+      extra: {
+        setContextLength: async (tokens) => {
+          calls.push(tokens);
+          return { text: tokens ? `now runs with a ${tokens / 1024}k context. It fits entirely on the GPU.` : "back to the default" };
+        },
+      },
+    });
+    await type("/context 32k\r");
+    await until(() => stdout.text().includes("now runs with a 32k context"));
+    await type("/context default\r");
+    await until(() => stdout.text().includes("back to the default"));
+    await type("/context huge\r");
+    await until(() => stdout.text().includes("Usage: /context"));
+    expect(calls).toEqual([32768, undefined]);
+  });
+
   it("lists rules with /permissions", async () => {
     const { stdout, type } = await mount([]);
     await type("/permissions\r");
