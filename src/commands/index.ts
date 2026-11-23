@@ -7,6 +7,7 @@ import { THEMES } from "../ui/theme.js";
 import { contextBreakdown, formatContext } from "../agent/context.js";
 import { formatTodos } from "../tools/todo.js";
 import { readHistory, statsReport, usageReport } from "../agent/stats.js";
+import { parseGoalArgs, type GoalOptions } from "../agent/goal.js";
 
 export interface CommandContext {
   agent: Agent;
@@ -45,6 +46,14 @@ export interface CommandContext {
   setContextLength?(tokens: number | "auto" | undefined): Promise<{ text: string; tone?: "info" | "warn" }>;
   /** Score models on fixed tasks and print a table (/bench). */
   bench?(specs: string[]): Promise<void>;
+  /** Work on a goal across turns (/goal). */
+  runGoal?(goal: GoalOptions): Promise<void>;
+  /** Repeating prompts (/loop). */
+  loops?: {
+    start(everyMs: number, prompt: string): string;
+    stop(id: string): boolean;
+    list(): Array<{ id: string; everyMs: number; prompt: string; runs: number }>;
+  };
 }
 
 export interface SlashCommand {
@@ -245,6 +254,71 @@ export const COMMANDS: SlashCommand[] = [
     },
   },
   {
+    name: "goal",
+    args: '<objective> [--check "<cmd>"] [--max-rounds N]',
+    description: "Keep working until the goal is met: the check passes, or the model verifies it's done",
+    async run(args, ctx) {
+      if (ctx.busy) return ctx.print("Wait for the current turn to finish first.", "warn");
+      if (!ctx.runGoal) return ctx.print("Goals aren't available here.", "warn");
+      const goal = parseGoalArgs(args);
+      if (!goal) return ctx.print('Usage: /goal <objective> [--check "<cmd>"] [--max-rounds N], e.g. /goal make the tests pass --check "npm test"', "error");
+      await ctx.runGoal(goal);
+    },
+  },
+  {
+    name: "loop",
+    args: "<interval> <prompt> | stop [id]",
+    description: "Run a prompt every interval (e.g. /loop 10m check the build); /loop lists, /loop stop ends",
+    run(args, ctx) {
+      if (!ctx.loops) return ctx.print("Loops aren't available here.", "warn");
+      const a = args.trim();
+      if (!a) {
+        const l = ctx.loops.list();
+        return ctx.print(l.length ? `Loops:\n${l.map((x) => `  ${x.id}  every ${formatInterval(x.everyMs)}  (${x.runs} run${x.runs === 1 ? "" : "s"})  ${x.prompt}`).join("\n")}` : "No loops. Start one with /loop 10m <prompt>.");
+      }
+      const [first, ...rest] = a.split(/\s+/);
+      if (first === "stop") {
+        const ids = rest.length ? rest : ctx.loops.list().map((x) => x.id);
+        if (!ids.length) return ctx.print("No loops to stop.");
+        const stopped = ids.filter((id) => ctx.loops!.stop(id));
+        return ctx.print(stopped.length ? `Stopped ${stopped.join(", ")}.` : `No loop ${ids.join(", ")}.`, stopped.length ? "info" : "warn");
+      }
+      const every = parseInterval(first!);
+      const prompt = rest.join(" ").trim();
+      if (every === undefined || !prompt) return ctx.print("Usage: /loop <interval> <prompt>, e.g. /loop 10m check whether CI passed (interval: 30s, 10m, 2h; at least 10s)", "error");
+      const id = ctx.loops.start(every, prompt);
+      ctx.print(`Started ${id}: every ${formatInterval(every)}, "${prompt}". It runs now, then whenever Forge is idle at each interval. /loop stop ${id} ends it.`);
+    },
+  },
+  {
+    name: "budget",
+    args: "[cost <usd> | tokens <n> | requests <n> | off]",
+    description: "Show or set this session's limits (cost, tokens, model requests per prompt)",
+    run(args, ctx) {
+      const [what, value] = args.trim().toLowerCase().split(/\s+/);
+      const b = { ...(ctx.agent.budget ?? {}) };
+      if (!what) {
+        const parts = [
+          b.costUSD !== undefined ? `cost $${b.costUSD} (used ${formatCost(ctx.agent.costUSD)})` : undefined,
+          b.tokens !== undefined ? `tokens ${formatTokens(b.tokens)} (used ${formatTokens(ctx.agent.usage.inputTokens + ctx.agent.usage.outputTokens)})` : undefined,
+          b.requestsPerPrompt !== undefined ? `${b.requestsPerPrompt} model requests per prompt` : undefined,
+        ].filter(Boolean);
+        return ctx.print(parts.length ? `Budget: ${parts.join(" · ")}` : 'No budget set. /budget cost 2, /budget tokens 500k, /budget requests 30, or "budget" in settings.');
+      }
+      if (what === "off") {
+        ctx.agent.setBudget(undefined);
+        return ctx.print("Budget removed for this session.");
+      }
+      const n = value === undefined ? NaN : what === "tokens" ? (parseContextSize(value) ?? NaN) : Number(value);
+      if (!Number.isFinite(n) || n <= 0 || !["cost", "tokens", "requests"].includes(what)) return ctx.print("Usage: /budget [cost <usd> | tokens <n> | requests <n> | off]", "error");
+      if (what === "cost") b.costUSD = n;
+      else if (what === "tokens") b.tokens = Math.round(n);
+      else b.requestsPerPrompt = Math.round(n);
+      ctx.agent.setBudget(b);
+      ctx.print(`Budget set: ${what} ${what === "cost" ? `$${n}` : Math.round(n)} (this session).`);
+    },
+  },
+  {
     name: "usage",
     args: "[project]",
     description: "Tokens and cost: this session, today, this week and month, by model and by day",
@@ -282,7 +356,7 @@ export const COMMANDS: SlashCommand[] = [
       const bg = ctx.agent.backgroundTasks;
       const now = Date.now();
       const bgText = bg.length
-        ? `\n\nBackground agents:\n${bg
+        ? `\n\nBackground jobs:\n${bg
             .map((t) => `  ${t.id.padEnd(10)}${t.status.padEnd(9)}${t.type}: ${t.description} (${Math.round((now - t.startedAt) / 1000)}s)${t.status === "running" && t.activity ? `\n  ${"".padEnd(19)}⎿ ${t.activity}` : ""}`)
             .join("\n")}`
         : "";
@@ -365,6 +439,20 @@ export async function switchTo(spec: string, ctx: Pick<CommandContext, "agent" |
 }
 
 /** "32k" → 32768, "24576" → 24576; undefined if it isn't a size. */
+/** "30s", "10m", "2h" → milliseconds (at least 10 s). */
+export function parseInterval(s: string): number | undefined {
+  const m = /^(\d+(?:\.\d+)?)(s|m|h)$/i.exec(s.trim());
+  if (!m) return undefined;
+  const ms = Number(m[1]) * { s: 1000, m: 60_000, h: 3_600_000 }[m[2]!.toLowerCase() as "s" | "m" | "h"];
+  return ms >= 10_000 ? ms : undefined;
+}
+
+export function formatInterval(ms: number): string {
+  if (ms % 3_600_000 === 0) return `${ms / 3_600_000}h`;
+  if (ms % 60_000 === 0) return `${ms / 60_000}m`;
+  return `${Math.round(ms / 1000)}s`;
+}
+
 export function parseContextSize(s: string): number | undefined {
   const m = /^(\d+(?:\.\d+)?)\s*(k)?$/i.exec(s.trim());
   if (!m) return undefined;

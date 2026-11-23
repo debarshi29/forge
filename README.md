@@ -157,6 +157,20 @@ forge --no-session        # don't save this one
 
 `/cost` shows tokens and estimated cost (Anthropic list prices, including cache reads and writes).
 
+### Goals, loops and budgets
+
+- **`/goal <objective> [--check "<cmd>"] [--max-rounds N]`** keeps Forge working across turns. With a check (`/goal
+  make the tests pass --check "npm test"`), Forge runs the command after every turn and gives the model the failing
+  output until it exits 0. Without a check, the model keeps going until it says it has verified the goal. Default 8
+  rounds; Esc stops it. Headless: `forge -p "make the tests pass" --check "npm test"` (exit code 0 if the goal is met).
+- **`/loop <interval> <prompt>`** runs a prompt now and then every interval (`30s`, `10m`, `2h`), skipping a beat if
+  Forge is busy. `/loop` lists loops; `/loop stop [id]` ends them.
+- **Background commands.** The model can run `bash` with `run_in_background` (a long test run, a build) and carry on;
+  the output arrives when the command exits, like a background agent's report. `/agents` lists running jobs.
+- **Budgets.** `"budget": {"costUSD": 2, "tokens": 500000, "requestsPerPrompt": 40}` (or `/budget cost 2`,
+  `/budget requests 40`, `/budget off`) stops the session or the current prompt when a limit is reached. Goals stop
+  with it.
+
 ### Usage, stats and the status line
 
 - **`/usage`** adds up every saved session: this session, today, the last 7 days, this month and all time, then this

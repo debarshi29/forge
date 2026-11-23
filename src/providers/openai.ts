@@ -398,7 +398,8 @@ export function toOpenAIMessages(messages: Message[]): ChatCompletionMessagePara
             ]
           : [],
       );
-      out.push({ role: "assistant", content: text || null, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) });
+      // null content is only valid alongside tool calls; an empty reply is sent as "".
+      out.push({ role: "assistant", content: text || (toolCalls.length ? null : ""), ...(toolCalls.length ? { tool_calls: toolCalls } : {}) });
       continue;
     }
 

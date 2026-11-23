@@ -73,7 +73,8 @@ export type AgentEvent =
   | { type: "todos"; todos: Todo[] }
   | { type: "notice"; text: string; tone: "info" | "warn" | "error" }
   | { type: "tool_progress"; id: string; text: string }
-  | { type: "done"; stop: StopReason | "aborted" | "blocked"; text: string; detail?: string };
+  | { type: "goal"; phase: "start" | "check" | "round" | "done" | "stopped"; text: string }
+  | { type: "done"; stop: StopReason | "aborted" | "blocked" | "budget"; text: string; detail?: string };
 
 export interface AgentOptions {
   provider: Provider;
@@ -97,6 +98,8 @@ export interface AgentOptions {
   fast?: { provider: Provider; model: string };
   /** Check files after write/edit and feed problems back (default on; false turns it off). */
   diagnostics?: false | DiagnosticsOptions;
+  /** Limits: session cost and tokens, and model requests per prompt. */
+  budget?: Budget;
   /** Subagent types the task tool can start (default: the built-in ones). */
   agentTypes?: AgentType[];
   /** Resolve a "provider:model" spec for subagents with their own model. */
@@ -148,6 +151,7 @@ export class Agent {
       approvePlan: (plan) => this.opts.permissions.approvePlan(plan),
       todos: this.todoState,
       runSubagent: (req, ctx) => this.runSubagent(req, ctx),
+      startBackground: (job) => this.startBackground(job),
     };
   }
 
@@ -220,19 +224,37 @@ export class Agent {
       recorder: { message() {}, usage: (spec, u) => this.opts.recorder?.usage(spec, u, true) },
     });
     if (!req.background) return this.driveChild(child, type, req, ctx.signal, ctx.progress);
+    const id = this.startBackground({
+      kind: "agent",
+      type: type.name,
+      description: req.description,
+      run: (signal, activity) => this.driveChild(child, type, req, signal, activity),
+    });
+    return { content: `Started background agent ${id} (${type.name}: ${req.description}). You'll get its report when it finishes; carry on with other work meanwhile.` };
+  }
 
-    const id = `agent-${++this.bgCounter}`;
+  /**
+   * Run a job (a subagent, a shell command) in the background. When it ends,
+   * listeners hear about it and its result goes to the model with the next request.
+   */
+  startBackground(job: BackgroundJob): string {
+    const id = `${job.kind}-${++this.bgCounter}`;
     const controller = new AbortController();
-    const task: BackgroundTask = { id, type: type.name, description: req.description, status: "running", startedAt: Date.now(), controller, done: Promise.resolve() };
-    task.done = this.driveChild(child, type, req, controller.signal, (text) => (task.activity = text)).then((r) => {
+    const task: BackgroundTask = { id, kind: job.kind, type: job.type, description: job.description, status: "running", startedAt: Date.now(), controller, done: Promise.resolve() };
+    const finish = (r: ToolResult) => {
       const text = typeof r.content === "string" ? r.content : "(no text)";
       task.status = controller.signal.aborted ? "stopped" : r.isError ? "failed" : "done";
       task.result = text;
-      this.notes.push(reminder(`Background agent ${id} (${type.name}: ${req.description}) ${task.status === "done" ? "finished" : task.status}. Its report:\n\n${text}`));
+      const what = job.kind === "agent" ? `agent ${id} (${job.type}: ${job.description})` : `command ${id} (${job.description})`;
+      const verb = task.status === "done" ? "finished" : task.status;
+      this.notes.push(reminder(`Background ${what} ${verb}. ${job.kind === "agent" ? "Its report" : "Its output"}:\n\n${text}`));
       for (const fn of this.bgListeners) fn(task);
-    });
+    };
+    task.done = job
+      .run(controller.signal, (text) => (task.activity = text))
+      .then(finish, (err: unknown) => finish({ content: err instanceof Error ? err.message : String(err), isError: true }));
     this.bg.set(id, task);
-    return { content: `Started background agent ${id} (${type.name}: ${req.description}). You'll get its report when it finishes; carry on with other work meanwhile.` };
+    return id;
   }
 
   private async subagentModel(type: AgentType): Promise<{ provider: Provider; model: string }> {
@@ -472,6 +494,7 @@ export class Agent {
     this.pushUser([...blocks, ...extra]);
     let stopHookRuns = 0;
     let nudges = 0;
+    let requests = 0;
 
     let compactedThisTurn = 0;
     while (true) {
@@ -483,6 +506,13 @@ export class Agent {
           return;
         }
       }
+      const over = this.overBudget(requests);
+      if (over) {
+        yield { type: "notice", text: over, tone: "warn" };
+        yield { type: "done", stop: "budget", text: "", detail: over };
+        return;
+      }
+      requests++;
       // --- stream one assistant turn (re-issued on retryable stream errors) ---
       let end: Extract<StreamEvent, { type: "message_end" }> | undefined;
       for (let attempt = 0; !end; attempt++) {
@@ -764,6 +794,28 @@ export class Agent {
     return result;
   }
 
+  /** Why the next request would break a budget, if it would. */
+  private overBudget(requestsThisPrompt: number): string | undefined {
+    const b = this.opts.budget;
+    if (!b) return undefined;
+    if (b.requestsPerPrompt !== undefined && requestsThisPrompt >= b.requestsPerPrompt) {
+      return `Stopped: this prompt reached its limit of ${b.requestsPerPrompt} model requests (budget.requestsPerPrompt).`;
+    }
+    if (b.costUSD !== undefined && this.costUSD >= b.costUSD) return `Stopped: the session reached its cost budget of $${b.costUSD} (budget.costUSD).`;
+    const tokens = this.usage.inputTokens + this.usage.outputTokens;
+    if (b.tokens !== undefined && tokens >= b.tokens) return `Stopped: the session used ${tokens} tokens, its budget is ${b.tokens} (budget.tokens).`;
+    return undefined;
+  }
+
+  /** Change the limits (settings, or /budget). */
+  setBudget(budget: Budget | undefined): void {
+    this.opts.budget = budget;
+  }
+
+  get budget(): Budget | undefined {
+    return this.opts.budget;
+  }
+
   /** Tools offered on the next request: exit_plan_mode only while plan mode is on. */
   private requestTools(): ToolSpec[] {
     const plan = this.opts.permissions.mode === "plan";
@@ -823,8 +875,17 @@ export class Agent {
   }
 }
 
+export interface BackgroundJob {
+  kind: "agent" | "bash";
+  /** Agent type, or "bash". */
+  type: string;
+  description: string;
+  run(signal: AbortSignal, activity: (text: string) => void): Promise<ToolResult>;
+}
+
 export interface BackgroundTask {
   id: string;
+  kind: "agent" | "bash";
   type: string;
   description: string;
   status: "running" | "done" | "failed" | "stopped";
@@ -836,6 +897,15 @@ export interface BackgroundTask {
   controller: AbortController;
   /** Settles when it finishes. */
   done: Promise<void>;
+}
+
+export interface Budget {
+  /** Stop when the session's estimated cost reaches this (USD). */
+  costUSD?: number;
+  /** Stop when the session's input + output tokens reach this. */
+  tokens?: number;
+  /** Stop a prompt after this many model requests. */
+  requestsPerPrompt?: number;
 }
 
 function lastAssistantText(messages: Message[]): string {

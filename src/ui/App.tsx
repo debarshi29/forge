@@ -30,6 +30,7 @@ import { Input, type Suggestion } from "./Input.js";
 import { PermissionDialog } from "./PermissionDialog.js";
 import { ItemView, ToolCard, type Item } from "./Transcript.js";
 import type { StatusState } from "../agent/statusLine.js";
+import { runGoal } from "../agent/goal.js";
 
 /** Lets the Permissions object (created before render) ask through the UI. */
 export interface AskBridge {
@@ -107,6 +108,15 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
   const [liveThinking, setLiveThinking] = useState("");
   const [running, setRunning] = useState<Array<{ id: string; name: string; summary: string; progress?: string }>>([]);
   const busyRef = useRef(false);
+  const loopsRef = useRef(new Map<string, { id: string; everyMs: number; prompt: string; runs: number; timer: ReturnType<typeof setInterval> | undefined }>());
+  const loopCounter = useRef(0);
+  const runTurnRef = useRef<((prompt: string) => Promise<void>) | undefined>(undefined);
+  useEffect(
+    () => () => {
+      for (const l of loopsRef.current.values()) clearInterval(l.timer);
+    },
+    [],
+  );
   const [statusText, setStatusText] = useState("");
   const [busy, setBusy] = useState(false);
   const [todos, setTodos] = useState<Todo[]>(agent.todos);
@@ -232,6 +242,10 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
               flush();
               push({ kind: "info", text: ev.text, tone: ev.tone });
               break;
+            case "goal":
+              flush();
+              push({ kind: "info", text: `◎ ${ev.text}`, tone: ev.phase === "stopped" || ev.phase === "check" ? "warn" : "info" });
+              break;
             case "retry":
               push({ kind: "info", text: `Stream interrupted (${ev.reason}); retrying…`, tone: "warn" });
               break;
@@ -292,7 +306,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
       agent.onBackgroundDone((task) => {
         push({
           kind: "info",
-          text: `⧉ Background agent ${task.id} (${task.description}) ${task.status === "done" ? "finished" : task.status}.`,
+          text: `⧉ Background ${task.kind === "agent" ? "agent" : "command"} ${task.id} (${task.description}) ${task.status === "done" ? "finished" : task.status}.`,
           tone: task.status === "done" ? "info" : "warn",
         });
         if (!busyRef.current) resumeRef.current?.();
@@ -300,6 +314,7 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
     [agent, push],
   );
   const runTurn = useCallback((prompt: string) => runStream((signal) => agent.send(prompt, signal)), [agent, runStream]);
+  runTurnRef.current = runTurn;
 
   const resetTranscript = (extra: ItemInput[] = []) => {
     // Static output can't be erased; clear the screen and start a new Static.
@@ -393,6 +408,32 @@ export function App({ agent, root, bridge, allowBypass, initialPrompt, pickSessi
           }
         }
       : undefined,
+    runGoal: (goal) => runStream((signal) => runGoal(agent, root, goal, signal)),
+    loops: {
+      start: (everyMs, prompt) => {
+        const id = `loop-${++loopCounter.current}`;
+        const loop = { id, everyMs, prompt, runs: 0, timer: undefined as ReturnType<typeof setInterval> | undefined };
+        const fire = () => {
+          // Skip a beat while Forge is busy rather than queueing prompts up.
+          if (busyRef.current) return;
+          loop.runs++;
+          push({ kind: "info", text: `↻ ${id}: ${prompt}` });
+          void runTurnRef.current?.(prompt);
+        };
+        loop.timer = setInterval(fire, everyMs);
+        loopsRef.current.set(id, loop);
+        setTimeout(fire, 0);
+        return id;
+      },
+      stop: (id) => {
+        const l = loopsRef.current.get(id);
+        if (!l) return false;
+        clearInterval(l.timer);
+        loopsRef.current.delete(id);
+        return true;
+      },
+      list: () => [...loopsRef.current.values()].map(({ id, everyMs, prompt, runs }) => ({ id, everyMs, prompt, runs })),
+    },
     compact: (focus) => runStream((signal) => agent.compact({ ...(focus ? { focus } : {}), signal, reason: "manual" })),
     busy,
     startNewSession: () => {

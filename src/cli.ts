@@ -21,6 +21,7 @@ import type { Provider } from "./providers/types.js";
 import { formatBench, runBench } from "./bench/index.js";
 import { loadAgentTypes } from "./agent/subagents.js";
 import { makeStatusLine } from "./agent/statusLine.js";
+import { runGoal, type GoalOptions } from "./agent/goal.js";
 import { makeTaskTool } from "./tools/task.js";
 import type { ProviderSettings } from "./providers/registry.js";
 import { defaultTools } from "./tools/registry.js";
@@ -39,6 +40,9 @@ interface Flags {
   resume?: string | boolean;
   session?: boolean;
   bench?: boolean;
+  check?: string;
+  goal?: boolean;
+  maxRounds?: string;
 }
 
 const program = new Command()
@@ -56,6 +60,9 @@ const program = new Command()
   .option("-r, --resume [id]", "resume a session by id (or pick one interactively)")
   .option("--no-session", "don't save this conversation")
   .option("--bench", "score models on fixed coding tasks (models as arguments; default: installed Ollama models)")
+  .option("--goal", "with -p: treat the prompt as a goal and keep working until it is met")
+  .option("--check <cmd>", "with -p: goal mode, done when this command exits 0 (implies --goal)")
+  .option("--max-rounds <n>", "with --goal: rounds before giving up (default 8)")
   .action(async (words: string[], flags: Flags) => {
     const root = path.resolve(flags.cwd ?? process.cwd());
     const config = loadConfig(root, { model: flags.model, effort: flags.effort, permissionMode: flags.permissionMode });
@@ -133,6 +140,7 @@ const program = new Command()
       diagnostics: config.diagnostics,
       repairToolCalls: config.repairToolCalls,
       agentTypes: agentTypes.types,
+      ...(config.budget ? { budget: config.budget } : {}),
       resolveModel: async (spec: string) => {
         const r = await resolveModelForUse(spec, providerSettings);
         return { provider: r.provider, model: r.model };
@@ -168,7 +176,11 @@ const program = new Command()
     if (!headless) for (const w of warnings) initialItems = [...(initialItems ?? []), { kind: "info", text: `⚠ ${w}`, tone: "warn" }];
 
     if (flags.print !== undefined) {
-      const ok = await runPrompt(agent, flags.print, flags.output);
+      const goal =
+        flags.goal || flags.check
+          ? { objective: flags.print, ...(flags.check ? { check: flags.check } : {}), ...(flags.maxRounds ? { maxRounds: Number(flags.maxRounds) } : {}) }
+          : undefined;
+      const ok = await runPrompt(agent, flags.print, flags.output, goal ? { goal, root } : undefined);
       rl?.close();
       process.exitCode = ok ? 0 : 1;
       return;
@@ -323,7 +335,7 @@ async function benchCommand(specs: string[], settings: ProviderSettings): Promis
 }
 
 /** Run one prompt; Ctrl+C aborts the turn. Returns false on error/refusal. */
-async function runPrompt(agent: Agent, prompt: string, output: "text" | "json"): Promise<boolean> {
+async function runPrompt(agent: Agent, prompt: string, output: "text" | "json", goalRun?: { goal: GoalOptions; root: string }): Promise<boolean> {
   const ac = new AbortController();
   const onSigint = () => ac.abort();
   process.once("SIGINT", onSigint);
@@ -332,10 +344,12 @@ async function runPrompt(agent: Agent, prompt: string, output: "text" | "json"):
     let next: string | [] = prompt;
     // Background agents report back after the turn: wait for them and let the model use their reports.
     while (true) {
-      for await (const ev of agent.send(next, ac.signal)) {
+      const first = goalRun && next === prompt;
+      for await (const ev of first ? runGoal(agent, goalRun.root, goalRun.goal, ac.signal) : agent.send(next, ac.signal)) {
         if (output === "json") process.stdout.write(JSON.stringify(ev) + "\n");
         else renderText(ev);
-        if (ev.type === "done") ok = ev.stop === "end_turn";
+        if (ev.type === "done" && !first) ok = ev.stop === "end_turn";
+        if (ev.type === "goal" && (ev.phase === "done" || ev.phase === "stopped")) ok = ev.phase === "done";
       }
       if (ac.signal.aborted || !ok) break;
       if (agent.backgroundTasks.some((t) => t.status === "running")) {
@@ -376,6 +390,9 @@ function renderText(ev: AgentEvent): void {
     case "tool_start":
       thinking = false;
       process.stderr.write(`\n\x1b[35m● ${ev.name}\x1b[0m ${dim(ev.summary)}\n`);
+      break;
+    case "goal":
+      process.stderr.write(`\n\x1b[36m◎ ${ev.text}\x1b[0m\n`);
       break;
     case "tool_progress":
       process.stderr.write(`\x1b[2m  ⎿ ${ev.text}\x1b[0m\n`);

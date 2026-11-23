@@ -31,6 +31,13 @@ export interface ToolContext {
   progress?(text: string): void;
   /** Run a subagent (the task tool). */
   runSubagent?(req: SubagentRequest, ctx: ToolContext): Promise<ToolResult>;
+  /** Start a background job; returns its id. Its result reaches the model when it ends. */
+  startBackground?(job: {
+    kind: "agent" | "bash";
+    type: string;
+    description: string;
+    run(signal: AbortSignal, activity: (text: string) => void): Promise<ToolResult>;
+  }): string;
 }
 
 export interface SubagentRequest {
