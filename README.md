@@ -157,6 +157,21 @@ forge --no-session        # don't save this one
 
 `/cost` shows tokens and estimated cost (Anthropic list prices, including cache reads and writes).
 
+### Usage, stats and the status line
+
+- **`/usage`** adds up every saved session: this session, today, the last 7 days, this month and all time, then this
+  month by model and a 14-day sparkline. `/usage project` counts only this project. Local models show as `$0 (local)`.
+- **`/stats`** shows sessions per day, prompts and active days, model requests per prompt, the tools and files used
+  most, and a weekday × hour heatmap of when you work.
+- **Status line.** `"statusLine": {"command": "…"}` runs a shell command after every turn and whenever the mode or model
+  changes, and shows the first two lines of its output under the prompt. It gets the state as JSON on stdin:
+  `session_id`, `cwd`, `model`, `permission_mode`, `context` (`tokens`, `window`, `percent`), `cost_usd` and `tokens`
+  (`input`, `output`). For example, the git branch and context use:
+
+```json
+{ "statusLine": { "command": "node -e \"let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);const b=require('child_process').execSync('git branch --show-current').toString().trim();console.log('⎇ '+b+' · ctx '+j.context.percent+'%')})\"" } }
+```
+
 ### Memory files
 
 Standing instructions are read from `AGENTS.md` and `FORGE.md`: first `~/.forge/`, then every directory from the repo root
